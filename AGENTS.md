@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Commands
 
-Always use `uv`, never `pip`. Requires Python ≥ 3.11.
+Always use `uv`, never `pip`. Requires Python ≥ 3.13.
 
 ```bash
 uv sync --all-extras                 # install deps (pytest lives in the `test` extra, not the dev group)
