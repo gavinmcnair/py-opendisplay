@@ -1067,9 +1067,10 @@ class OpenDisplayDevice:  # pylint: disable=too-many-instance-attributes
         self._fw_version = parse_firmware_version(response)
 
         _LOGGER.info(
-            "Firmware version: %d.%d (SHA: %s...)",
+            "Firmware version: %d.%d.%d (SHA: %s...)",
             self._fw_version["major"],
             self._fw_version["minor"],
+            self._fw_version["patch"],
             self._fw_version["sha"][:8],
         )
 

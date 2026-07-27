@@ -167,6 +167,17 @@ class TestParseFirmwareVersion:
         result = parse_firmware_version(data)
         assert result["patch"] == 0
 
+    def test_parse_firmware_version_patch_read_at_sha_boundary(self):
+        """The patch byte is read at 5 + sha_length, not at a fixed offset.
+
+        The cases above both use a 40-char SHA, so an off-by-one in that index
+        would still pass them. With a one-character SHA a wrong offset reads
+        "9" (0x39) or runs off the end instead of 7.
+        """
+        data = b"\x00\x43\x03\x00\x01" + b"9" + b"\x07"
+        result = parse_firmware_version(data)
+        assert result == {"major": 3, "minor": 0, "patch": 7, "sha": "9"}
+
     def test_parse_firmware_version_real_data(self, real_firmware_response):
         """Test parsing real firmware response from device."""
         if real_firmware_response and len(real_firmware_response) >= 5:
