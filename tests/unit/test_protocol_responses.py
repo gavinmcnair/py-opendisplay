@@ -141,16 +141,31 @@ class TestParseFirmwareVersion:
 
     def test_parse_firmware_version_basic(self):
         """Test parsing firmware version with echo and SHA."""
-        # Format: [echo:2][major:1][minor:1][shaLength:1][sha:variable]
+        # Format: [echo:2][major:1][minor:1][shaLength:1][sha:variable][patch:1?]
         data = b"\x00\x43\x01\x05\x07gaberin"  # Version 1.5, SHA "gaberin"
         result = parse_firmware_version(data)
-        assert result == {"major": 1, "minor": 5, "sha": "gaberin"}
+        assert result == {"major": 1, "minor": 5, "sha": "gaberin", "patch": 0}
 
     def test_parse_firmware_version_with_ack_bit(self):
         """Test parsing with ACK bit set in echo."""
         data = b"\x80\x43\x02\x03\x04test"  # Version 2.3 with ACK, SHA "test"
         result = parse_firmware_version(data)
-        assert result == {"major": 2, "minor": 3, "sha": "test"}
+        assert result == {"major": 2, "minor": 3, "sha": "test", "patch": 0}
+
+    def test_parse_firmware_version_with_trailing_patch_byte(self):
+        """Firmware > 2.25.0 appends the patch version after the SHA."""
+        # Version 2.25.1, 40-char SHA, trailing patch byte
+        sha = "a" * 40
+        data = b"\x80\x43\x02\x19\x28" + sha.encode("ascii") + b"\x01"
+        result = parse_firmware_version(data)
+        assert result == {"major": 2, "minor": 25, "sha": sha, "patch": 1}
+
+    def test_parse_firmware_version_without_patch_byte_defaults_to_zero(self):
+        """Older firmware omits the trailing patch byte; patch reads as 0."""
+        sha = "b" * 40
+        data = b"\x80\x43\x02\x19\x28" + sha.encode("ascii")
+        result = parse_firmware_version(data)
+        assert result["patch"] == 0
 
     def test_parse_firmware_version_real_data(self, real_firmware_response):
         """Test parsing real firmware response from device."""

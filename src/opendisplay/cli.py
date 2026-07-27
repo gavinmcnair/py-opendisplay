@@ -305,7 +305,12 @@ def _info_to_json(data: dict[str, Any]) -> dict[str, Any]:
         }
         if wifi and wifi.ssid_text
         else None,
-        "firmware": {"major": fw["major"], "minor": fw["minor"], "sha": fw["sha"]},
+        "firmware": {
+            "major": fw["major"],
+            "minor": fw["minor"],
+            "patch": fw.get("patch", 0),
+            "sha": fw["sha"],
+        },
     }
 
 
