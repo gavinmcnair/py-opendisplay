@@ -26,6 +26,22 @@
   ACK streams that never make progress (previously loops without a progress
   guarantee, reachable only with buggy/hostile firmware).
 
+## [7.14.1](https://github.com/OpenDisplay/py-opendisplay/compare/v7.14.0...v7.14.1) (2026-07-27)
+
+
+### Bug Fixes
+
+* Fix ADC ladder BinaryInputs wire layout ([d04c32c](https://github.com/OpenDisplay/py-opendisplay/commit/d04c32c5c128d87336cca1555e0b336856f54b92))
+* parse the trailing patch byte in the firmware version response ([dde29df](https://github.com/OpenDisplay/py-opendisplay/commit/dde29df558158cc69183b2e471e938fcfad75fc5))
+* parse the trailing patch byte in the firmware version response ([fe6cecb](https://github.com/OpenDisplay/py-opendisplay/commit/fe6cecb049a6d34e40359acbf3f5da30183b7217))
+* show the patch component in the CLI tree and device log ([31998c3](https://github.com/OpenDisplay/py-opendisplay/commit/31998c3764516e262330a3b12c357907bc65f890))
+* show the patch component in the CLI tree and device log ([08bff11](https://github.com/OpenDisplay/py-opendisplay/commit/08bff11a05366d41946f2ae44d578b9cc5f23d42))
+
+
+### Documentation
+
+* add AGENTS.md guidance for AI coding agents ([4593653](https://github.com/OpenDisplay/py-opendisplay/commit/4593653c024e7deed820027dba9f291b1bb60c9a))
+
 ## [7.14.0](https://github.com/OpenDisplay/py-opendisplay/compare/v7.13.1...v7.14.0) (2026-07-23)
 
 
