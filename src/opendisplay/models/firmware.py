@@ -42,8 +42,11 @@ class FirmwareVersion(TypedDict):
         major: Major version number (0-255)
         minor: Minor version number (0-255)
         sha: Git commit SHA hash
+        patch: Patch version number (0-255); 0 when the firmware predates
+            the trailing patch byte in the version response
     """
 
     major: int
     minor: int
     sha: str
+    patch: int

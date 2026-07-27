@@ -223,13 +223,17 @@ def parse_authenticate_success(data: bytes) -> bytes:
 def parse_firmware_version(data: bytes) -> FirmwareVersion:
     """Parse firmware version response.
 
-    Format: [echo:2][major:1][minor:1][shaLength:1][sha:variable]
+    Format: [echo:2][major:1][minor:1][shaLength:1][sha:variable][patch:1]
+
+    The trailing patch byte was added after the 2.25.0 firmware release; it
+    is placed after the SHA so older hosts that stop reading there keep
+    working. When absent, patch is reported as 0.
 
     Args:
         data: Raw firmware version response
 
     Returns:
-        FirmwareVersion dictionary with 'major', 'minor', and 'sha' fields
+        FirmwareVersion dictionary with 'major', 'minor', 'sha', and 'patch' fields
 
     Raises:
         InvalidResponseError: If response format invalid
@@ -265,10 +269,14 @@ def parse_firmware_version(data: bytes) -> FirmwareVersion:
     except UnicodeDecodeError as e:
         raise InvalidResponseError(f"Invalid SHA hash encoding (expected ASCII): {e}") from e
 
+    # Optional trailing patch byte (firmware > 2.25.0); absent on older firmware.
+    patch = data[5 + sha_length] if len(data) > 5 + sha_length else 0
+
     return {
         "major": major,
         "minor": minor,
         "sha": sha,
+        "patch": patch,
     }
 
 
