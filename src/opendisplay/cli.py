@@ -391,7 +391,7 @@ def _build_info_tree(data: dict[str, Any]) -> Tree:
         enc_str = enc_enum.name if isinstance(enc_enum, WifiEncryption) else f"0x{enc_enum:02x}"
         wf.add(f"Encryption    {enc_str}")
 
-    tree.add(f"[bold]Firmware[/bold]          {fw['major']}.{fw['minor']}  [dim](sha: {fw['sha']})[/dim]")
+    tree.add(f"[bold]Firmware[/bold]          {fw['major']}.{fw['minor']}.{fw['patch']}  [dim](sha: {fw['sha']})[/dim]")
     return tree
 
 
