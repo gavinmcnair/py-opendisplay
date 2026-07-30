@@ -21,13 +21,17 @@ from opendisplay.models.config import (
     DisplayConfig,
     FlashConfig,
     GlobalConfig,
+    LedConfig,
     ManufacturerData,
     NfcConfig,
     PassiveBuzzer,
     PowerOption,
+    SensorData,
     SystemConfig,
     TouchController,
+    WifiConfig,
 )
+from opendisplay.models.enums import LedType
 
 _FW = {"major": 2, "minor": 26, "patch": 0, "sha": "987c6d9"}
 
@@ -401,6 +405,107 @@ def test_deep_sleep_json_is_numeric_seconds() -> None:
     cfg.power.deep_sleep_time_seconds = 30
     cfg.power.deep_sleep_current_ua = 12
     assert _info_to_json(_ctx(cfg))["power"]["deep_sleep_time_s"] == 30
+
+
+# ── LEDs and sensors ─────────────────────────────────────────────────────────
+
+
+def _led(led_type: int) -> LedConfig:
+    return LedConfig(
+        instance_number=0,
+        led_type=led_type,
+        led_1_r=0,
+        led_2_g=0,
+        led_3_b=0,
+        led_4=0,
+        led_flags=0,
+        reserved=b"\x00" * 14,
+    )
+
+
+def test_led_type_is_named() -> None:
+    assert "RGB" in _text(_config(leds=[_led(LedType.RGB)]))
+
+
+def test_unknown_led_type_falls_back_to_hex() -> None:
+    assert "0x7f" in _text(_config(leds=[_led(0x7F)]))
+
+
+def test_sensor_is_reported_with_bus() -> None:
+    sensor = SensorData(
+        instance_number=0,
+        sensor_type=1,
+        bus_id=2,
+        i2c_addr_7bit=0x44,
+        msd_data_start_byte=0,
+        reserved=b"\x00" * 24,
+    )
+    out = _text(_config(sensors=[sensor]))
+    assert "Sensor 0" in out
+    assert "bus 2" in out
+
+
+# ── WiFi section ─────────────────────────────────────────────────────────────
+
+
+def _wifi(**overrides: Any) -> WifiConfig:
+    base: dict[str, Any] = dict(
+        ssid="Antarctica-IOT",
+        password="secret",
+        encryption_type=3,
+        server_url="",
+        server_port=2446,
+    )
+    base.update(overrides)
+    return WifiConfig.from_strings(**base)
+
+
+def test_wifi_section_reports_ssid_and_encryption() -> None:
+    out = _text(_config(wifi_config=_wifi()))
+    assert "Antarctica-IOT" in out
+    assert "WPA2" in out
+
+
+def test_wifi_section_is_absent_without_an_ssid() -> None:
+    assert "SSID" not in _text(_config(wifi_config=_wifi(ssid="")))
+
+
+def test_wifi_server_is_shown_when_configured() -> None:
+    out = _text(_config(wifi_config=_wifi(server_url="hub.local", server_port=2447)))
+    assert "hub.local:2447" in out
+
+
+def test_wifi_server_is_omitted_when_unset() -> None:
+    assert "Server" not in _text(_config(wifi_config=_wifi()))
+
+
+def test_unknown_wifi_encryption_falls_back_to_hex() -> None:
+    assert "0x7f" in _text(_config(wifi_config=_wifi(encryption_type=0x7F)))
+
+
+# ── deep sleep ───────────────────────────────────────────────────────────────
+
+
+def test_deep_sleep_line_includes_current_draw() -> None:
+    cfg = _config()
+    cfg.power.deep_sleep_time_seconds = 30
+    cfg.power.deep_sleep_current_ua = 12
+    assert "30s @ 12 µA" in _text(cfg)
+
+
+def test_deep_sleep_line_omits_current_when_unknown() -> None:
+    cfg = _config()
+    cfg.power.deep_sleep_time_seconds = 30
+    assert "30s" in _text(cfg)
+    assert "µA" not in _text(cfg)
+
+
+# ── unknown enum fallbacks ───────────────────────────────────────────────────
+
+
+def test_unknown_partial_update_value_falls_back_to_hex() -> None:
+    cfg = _config(displays=[_display(partial_update_support=0x7F)])
+    assert "0x7f" in _text(cfg)
 
 
 def test_report_survives_missing_config() -> None:
