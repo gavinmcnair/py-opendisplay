@@ -26,6 +26,15 @@
   ACK streams that never make progress (previously loops without a progress
   guarantee, reachable only with buggy/hostile firmware).
 
+## [7.14.2](https://github.com/OpenDisplay/py-opendisplay/compare/v7.14.1...v7.14.2) (2026-07-30)
+
+
+### Bug Fixes
+
+* **cli:** report all config packets in info via a table-driven renderer ([3d723a2](https://github.com/OpenDisplay/py-opendisplay/commit/3d723a20997012acbb936de1d2106b7bc79586a6))
+* **cli:** report all config packets in info via a table-driven renderer ([3fd74e2](https://github.com/OpenDisplay/py-opendisplay/commit/3fd74e23479379de0330f5519658fd667b2b608f))
+* **discovery:** bind zeroconf handler by the keyword names it dispatches with ([d5a7ed6](https://github.com/OpenDisplay/py-opendisplay/commit/d5a7ed63393556a133f0a7ee32d97c08342c4daf))
+
 ## [7.14.1](https://github.com/OpenDisplay/py-opendisplay/compare/v7.14.0...v7.14.1) (2026-07-27)
 
 
