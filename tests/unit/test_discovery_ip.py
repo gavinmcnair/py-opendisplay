@@ -51,9 +51,22 @@ class _FakeBrowser:
         _FakeBrowser.instances.append(self)
         for name in _REGISTRY:
             for handler in handlers:
-                handler(_zc, _service_type, name, ServiceStateChange.Added)
+                # Real zeroconf dispatches via Signal.fire() using KEYWORD
+                # arguments; calling positionally here would let a handler with
+                # mismatched parameter names pass the suite and fail on hardware.
+                handler(
+                    zeroconf=_zc,
+                    service_type=_service_type,
+                    name=name,
+                    state_change=ServiceStateChange.Added,
+                )
                 # A concurrent Removed for the same name must not register it.
-                handler(_zc, _service_type, name, ServiceStateChange.Removed)
+                handler(
+                    zeroconf=_zc,
+                    service_type=_service_type,
+                    name=name,
+                    state_change=ServiceStateChange.Removed,
+                )
 
     async def async_cancel(self) -> None:
         self.cancelled = True

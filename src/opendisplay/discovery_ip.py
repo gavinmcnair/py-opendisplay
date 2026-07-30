@@ -80,11 +80,14 @@ async def discover_ip_devices(scan_seconds: float = 3.0) -> dict[str, IpDeviceIn
     found_names: set[str] = set()
 
     def _on_change(
-        _zeroconf: object,
-        _service_type: str,
+        zeroconf: object,  # noqa: ARG001  # pylint: disable=unused-argument
+        service_type: str,  # noqa: ARG001  # pylint: disable=unused-argument
         name: str,
         state_change: ServiceStateChange,
     ) -> None:
+        # zeroconf's Signal.fire() dispatches to handlers with KEYWORD arguments
+        # (zeroconf=, service_type=, name=, state_change=), so these parameter
+        # names are part of the contract and must not be underscore-prefixed.
         if state_change is ServiceStateChange.Added:
             found_names.add(name)
 
