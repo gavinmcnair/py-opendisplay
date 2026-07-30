@@ -1,0 +1,515 @@
+"""Tests for the `opendisplay info` report.
+
+The renderer is driven by a declarative section spec (``_INFO_SECTIONS``) so
+that packets added to ``GlobalConfig`` surface without a hand-written branch per
+field. These tests pin two things: that every populated packet reaches both the
+tree and the ``--json`` output, and that packets absent from a device's config
+stay absent from the report.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+import pytest
+from rich.console import Console
+
+from opendisplay.cli import _build_info_tree, _info_to_json, _InfoContext
+from opendisplay.models.config import (
+    DataBus,
+    DataExtended,
+    DisplayConfig,
+    FlashConfig,
+    GlobalConfig,
+    LedConfig,
+    ManufacturerData,
+    NfcConfig,
+    PassiveBuzzer,
+    PowerOption,
+    SensorData,
+    SystemConfig,
+    TouchController,
+    WifiConfig,
+)
+from opendisplay.models.enums import LedType
+
+_FW = {"major": 2, "minor": 26, "patch": 0, "sha": "987c6d9"}
+
+
+def _display(**overrides: Any) -> DisplayConfig:
+    base: dict[str, Any] = dict(
+        instance_number=0,
+        display_technology=1,
+        panel_ic_type=0x0BB8,
+        pixel_width=1872,
+        pixel_height=1404,
+        active_width_mm=209,
+        active_height_mm=157,
+        tag_type=0,
+        rotation=0,
+        reset_pin=0x0C,
+        busy_pin=0x0D,
+        dc_pin=0x08,
+        cs_pin=0x0A,
+        data_pin=0x09,
+        partial_update_support=1,
+        color_scheme=0,
+        transmission_modes=0x19,  # STREAMING | DIRECT_WRITE | PIPE_WRITE
+        clk_pin=0x07,
+        reserved_pins=b"\xff" * 7,
+        full_update_mC=0,
+        reserved=b"\x00" * 13,
+    )
+    base.update(overrides)
+    return DisplayConfig(**base)
+
+
+def _config(**overrides: Any) -> GlobalConfig:
+    base: dict[str, Any] = dict(
+        system=SystemConfig(
+            ic_type=2,
+            communication_modes=0x05,
+            device_flags=0,
+            pwr_pin=0xFF,
+            reserved=b"\x00" * 16,
+            pwr_pin_2=0,
+            pwr_pin_3=0,
+        ),
+        manufacturer=ManufacturerData(
+            manufacturer_id=1,
+            board_type=1,
+            board_revision=1,
+            reserved=b"\x00" * 14,
+            simple_config_driver_index=0,
+            simple_config_display_index=0,
+            simple_config_power_index=0,
+            simple_config_configured_at=0,
+        ),
+        power=PowerOption(
+            power_mode=1,
+            battery_capacity_mah=(3000).to_bytes(3, "little"),
+            sleep_timeout_ms=40000,
+            tx_power=8,
+            sleep_flags=0,
+            battery_sense_pin=1,
+            battery_sense_enable_pin=0x28,
+            battery_sense_flags=0,
+            capacity_estimator=5,
+            voltage_scaling_factor=0xA1,
+            deep_sleep_current_ua=0,
+            deep_sleep_time_seconds=0,
+            charge_enable_pin=0,
+            charge_state_pin=0,
+            charger_flags=0,
+            min_wake_time_seconds=0,
+            screen_timeout_seconds=0,
+            reserved=b"\x00" * 4,
+        ),
+        displays=[_display()],
+    )
+    base.update(overrides)
+    return GlobalConfig(**base)
+
+
+def _ctx(config: GlobalConfig | None) -> _InfoContext:
+    return _InfoContext(
+        mac="AA:BB:CC:DD:EE:FF",
+        device_name="OD405BD8",
+        fw=_FW,
+        config=config,
+        width=1872,
+        height=1404,
+        color_scheme_name="MONO",
+        rotation=0,
+        board_type_name="reTerminal E1003",
+    )
+
+
+def _text(config: GlobalConfig | None) -> str:
+    console = Console(width=120, record=True, force_terminal=False)
+    console.print(_build_info_tree(_ctx(config)))
+    return console.export_text()
+
+
+# ── transmission modes ───────────────────────────────────────────────────────
+
+
+def test_pipe_write_is_reported_when_advertised() -> None:
+    assert "PIPE_WRITE" in _text(_config())
+
+
+def test_pipe_write_is_absent_when_not_advertised() -> None:
+    cfg = _config(displays=[_display(transmission_modes=0x09)])
+    assert "PIPE_WRITE" not in _text(cfg)
+
+
+def test_transmission_modes_in_json_include_pipe_write() -> None:
+    assert "PIPE_WRITE" in _info_to_json(_ctx(_config()))["display"]["transmission_modes"]
+
+
+# ── display capability fields ────────────────────────────────────────────────
+
+
+def test_partial_update_support_is_reported() -> None:
+    assert "Partial" in _text(_config())
+
+
+def test_partial_update_full_frame_is_distinguished_from_line_rect() -> None:
+    line_rect = _text(_config(displays=[_display(partial_update_support=1)]))
+    full_frame = _text(_config(displays=[_display(partial_update_support=2)]))
+    assert line_rect != full_frame
+
+
+# ── packets that were previously never rendered ──────────────────────────────
+
+
+def test_touch_controller_is_reported() -> None:
+    tc = TouchController(
+        instance_number=0,
+        touch_ic_type=1,
+        bus_id=0,
+        i2c_addr_7bit=0x14,
+        int_pin=0x02,
+        rst_pin=0x30,
+        display_instance=0,
+        flags=0,
+        poll_interval_ms=100,
+        touch_data_start_byte=1,
+        reserved=b"\x00" * 21,
+    )
+    out = _text(_config(touch_controllers=[tc]))
+    assert "Touch" in out
+    assert "0x14" in out
+
+
+def test_passive_buzzer_is_reported() -> None:
+    bz = PassiveBuzzer(
+        instance_number=0,
+        drive_pin=0x2D,
+        enable_pin=0xFF,
+        flags=0x01,
+        duty_percent=50,
+        reserved=b"\x00" * 27,
+    )
+    assert "Buzzer" in _text(_config(buzzers=[bz]))
+
+
+def _c_str(value: str) -> bytes:
+    """Encode as the firmware does: 32-byte null-terminated, zero-padded."""
+    return value.encode().ljust(32, b"\x00")
+
+
+def test_data_extended_identity_strings_are_reported() -> None:
+    ext = DataExtended(
+        manufacturer_name=_c_str("Seeed Studio"),
+        model_name=_c_str("reTerminal E1003"),
+        serial_number=_c_str("SN-12345"),
+        friendly_name=_c_str("Kitchen display"),
+        device_location=_c_str("Kitchen"),
+        device_id=_c_str("dev-1"),
+    )
+    out = _text(_config(data_extended=ext))
+    assert "SN-12345" in out
+    assert "Kitchen display" in out
+
+
+def test_identity_strings_are_decoded_not_raw_bytes() -> None:
+    """The packet holds 32-byte buffers; the report must show text, not repr()."""
+    ext = DataExtended(model_name=_c_str("reTerminal E1003"))
+    out = _text(_config(data_extended=ext))
+    assert "\\x00" not in out
+    assert "b'" not in out
+
+
+def test_empty_identity_fields_are_omitted() -> None:
+    """An all-zero buffer means 'unset' and must not produce a line."""
+    ext = DataExtended(model_name=_c_str("reTerminal E1003"))
+    out = _text(_config(data_extended=ext))
+    assert "Serial" not in out
+    assert "Location" not in out
+
+
+# ── human-readable values ────────────────────────────────────────────────────
+
+
+def test_panel_ic_type_is_named_not_just_hex() -> None:
+    """0x0bb8 (3000) is the ED103TC2; a bare hex id tells a reader nothing."""
+    out = _text(_config())
+    assert "ED103TC2" in out.upper()
+
+
+def test_unknown_panel_ic_type_falls_back_to_hex() -> None:
+    cfg = _config(displays=[_display(panel_ic_type=0xABCD)])
+    assert "0xabcd" in _text(cfg)
+
+
+def test_display_technology_is_named() -> None:
+    assert "E_PAPER" in _text(_config()).upper()
+
+
+def test_button_input_type_is_named_not_hex() -> None:
+    from opendisplay.models.config import BinaryInputs
+
+    button = BinaryInputs(
+        instance_number=0,
+        input_type=1,
+        display_as=0,
+        reserved_pins=b"\xff" * 3,
+        input_flags=0,
+        invert=0,
+        pullups=0,
+        pulldowns=0,
+        button_data_byte_index=0,
+        power_off_flags=0,
+        power_off_hold_sec=0,
+        reserved=b"\x00" * 12,
+    )
+    out = _text(_config(binary_inputs=[button]))
+    assert "DIGITAL" in out.upper()
+    assert "type 0x01" not in out
+
+
+def test_full_frame_partial_support_is_spelled_out() -> None:
+    cfg = _config(displays=[_display(partial_update_support=2)])
+    assert "full-frame" in _text(cfg).lower()
+
+
+# ── display resolution ───────────────────────────────────────────────────────
+
+
+def test_resolution_reports_both_dimensions() -> None:
+    assert "1872x1404px" in _text(_config())
+
+
+def test_data_bus_is_reported() -> None:
+    bus = DataBus(
+        instance_number=0,
+        bus_type=1,
+        pin_1=0x14,
+        pin_2=0x13,
+        pin_3=0,
+        pin_4=0,
+        pin_5=0,
+        pin_6=0,
+        pin_7=0,
+        bus_speed_hz=400000,
+        bus_flags=0,
+        pullups=3,
+        pulldowns=0,
+        reserved=b"\x00" * 8,
+    )
+    assert "Bus" in _text(_config(data_buses=[bus]))
+
+
+def test_nfc_config_is_reported() -> None:
+    nfc = NfcConfig(
+        instance_number=0,
+        nfc_ic_type=1,
+        bus_instance=0,
+        flags=0,
+        field_detect_pin=0xFF,
+        field_detect_mode=0,
+        field_detect_active=0,
+        field_detect_debounce_ms=0,
+        power_pin=0xFF,
+        power_active=0,
+        power_on_delay_ms=0,
+        power_off_delay_ms=0,
+        adv_button_byte_index=0,
+        adv_button_button_id=0,
+        reserved_pin_1=0xFF,
+        reserved_pin_2=0xFF,
+        reserved=b"\x00" * 14,
+    )
+    assert "NFC" in _text(_config(nfc_configs=[nfc]))
+
+
+def test_flash_config_is_reported() -> None:
+    flash = FlashConfig(
+        instance_number=0,
+        flash_ic_type=1,
+        bus_instance=0,
+        flags=0,
+        mosi_pin=0x10,
+        sck_pin=0x11,
+        cs_pin=0x12,
+        power_pin=0xFF,
+        power_active=0,
+        power_on_delay_ms=0,
+        power_off_delay_ms=0,
+        mode=0,
+        reserved=b"\x00" * 17,
+    )
+    assert "Flash" in _text(_config(flash_configs=[flash]))
+
+
+# ── absent packets stay absent ───────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("label", ["Touch", "Buzzer", "NFC", "Flash"])
+def test_absent_packets_are_not_rendered(label: str) -> None:
+    assert label not in _text(_config())
+
+
+def test_absent_packets_are_not_in_json() -> None:
+    rendered = _info_to_json(_ctx(_config()))
+    for key in ("touch_controllers", "buzzers", "nfc", "flash"):
+        assert rendered.get(key) in (None, [])
+
+
+# ── JSON back-compatibility ──────────────────────────────────────────────────
+
+
+def test_existing_json_keys_are_preserved() -> None:
+    rendered = _info_to_json(_ctx(_config()))
+    assert set(rendered) >= {"mac", "display", "hardware", "power", "firmware"}
+    assert set(rendered["display"]) >= {
+        "width",
+        "height",
+        "active_width_mm",
+        "active_height_mm",
+        "diagonal_inches",
+        "color_scheme",
+        "rotation",
+        "panel_ic_type",
+        "full_update_mc",
+        "transmission_modes",
+    }
+    assert set(rendered["hardware"]) >= {
+        "ic",
+        "manufacturer",
+        "board_type",
+        "board_revision",
+        "leds",
+        "sensors",
+        "buttons",
+    }
+    assert set(rendered["power"]) >= {"mode", "battery_mah", "chemistry", "sleep_timeout_s", "tx_power_dbm"}
+    assert rendered["firmware"] == {"major": 2, "minor": 26, "patch": 0, "sha": "987c6d9"}
+
+
+def test_sleep_timeout_json_is_seconds_not_milliseconds() -> None:
+    """The key is `_s`; the packet stores ms. Scripts parsing this must not break."""
+    assert _info_to_json(_ctx(_config()))["power"]["sleep_timeout_s"] == 40.0
+
+
+def test_zero_valued_power_fields_are_null_in_json() -> None:
+    """Preserves the pre-existing `or None` behaviour these keys shipped with."""
+    power = _info_to_json(_ctx(_config()))["power"]
+    assert power["deep_sleep_time_s"] is None
+    assert power["deep_sleep_current_ua"] is None
+
+
+def test_deep_sleep_json_is_numeric_seconds() -> None:
+    cfg = _config()
+    cfg.power.deep_sleep_time_seconds = 30
+    cfg.power.deep_sleep_current_ua = 12
+    assert _info_to_json(_ctx(cfg))["power"]["deep_sleep_time_s"] == 30
+
+
+# ── LEDs and sensors ─────────────────────────────────────────────────────────
+
+
+def _led(led_type: int) -> LedConfig:
+    return LedConfig(
+        instance_number=0,
+        led_type=led_type,
+        led_1_r=0,
+        led_2_g=0,
+        led_3_b=0,
+        led_4=0,
+        led_flags=0,
+        reserved=b"\x00" * 14,
+    )
+
+
+def test_led_type_is_named() -> None:
+    assert "RGB" in _text(_config(leds=[_led(LedType.RGB)]))
+
+
+def test_unknown_led_type_falls_back_to_hex() -> None:
+    assert "0x7f" in _text(_config(leds=[_led(0x7F)]))
+
+
+def test_sensor_is_reported_with_bus() -> None:
+    sensor = SensorData(
+        instance_number=0,
+        sensor_type=1,
+        bus_id=2,
+        i2c_addr_7bit=0x44,
+        msd_data_start_byte=0,
+        reserved=b"\x00" * 24,
+    )
+    out = _text(_config(sensors=[sensor]))
+    assert "Sensor 0" in out
+    assert "bus 2" in out
+
+
+# ── WiFi section ─────────────────────────────────────────────────────────────
+
+
+def _wifi(**overrides: Any) -> WifiConfig:
+    base: dict[str, Any] = dict(
+        ssid="Antarctica-IOT",
+        password="secret",
+        encryption_type=3,
+        server_url="",
+        server_port=2446,
+    )
+    base.update(overrides)
+    return WifiConfig.from_strings(**base)
+
+
+def test_wifi_section_reports_ssid_and_encryption() -> None:
+    out = _text(_config(wifi_config=_wifi()))
+    assert "Antarctica-IOT" in out
+    assert "WPA2" in out
+
+
+def test_wifi_section_is_absent_without_an_ssid() -> None:
+    assert "SSID" not in _text(_config(wifi_config=_wifi(ssid="")))
+
+
+def test_wifi_server_is_shown_when_configured() -> None:
+    out = _text(_config(wifi_config=_wifi(server_url="hub.local", server_port=2447)))
+    assert "hub.local:2447" in out
+
+
+def test_wifi_server_is_omitted_when_unset() -> None:
+    assert "Server" not in _text(_config(wifi_config=_wifi()))
+
+
+def test_unknown_wifi_encryption_falls_back_to_hex() -> None:
+    assert "0x7f" in _text(_config(wifi_config=_wifi(encryption_type=0x7F)))
+
+
+# ── deep sleep ───────────────────────────────────────────────────────────────
+
+
+def test_deep_sleep_line_includes_current_draw() -> None:
+    cfg = _config()
+    cfg.power.deep_sleep_time_seconds = 30
+    cfg.power.deep_sleep_current_ua = 12
+    assert "30s @ 12 µA" in _text(cfg)
+
+
+def test_deep_sleep_line_omits_current_when_unknown() -> None:
+    cfg = _config()
+    cfg.power.deep_sleep_time_seconds = 30
+    assert "30s" in _text(cfg)
+    assert "µA" not in _text(cfg)
+
+
+# ── unknown enum fallbacks ───────────────────────────────────────────────────
+
+
+def test_unknown_partial_update_value_falls_back_to_hex() -> None:
+    cfg = _config(displays=[_display(partial_update_support=0x7F)])
+    assert "0x7f" in _text(cfg)
+
+
+def test_report_survives_missing_config() -> None:
+    """A device that never returned a config still renders MAC and firmware."""
+    out = _text(None)
+    assert "OD405BD8" in out
+    assert "2.26" in out
