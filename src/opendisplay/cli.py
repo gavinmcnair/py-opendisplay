@@ -9,7 +9,7 @@ import logging
 import os
 import sys
 from collections.abc import Callable, Coroutine
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, NoReturn, TypeVar
 
@@ -18,7 +18,7 @@ from PIL import Image, UnidentifiedImageError
 from rich.console import Console
 from rich.live import Live
 from rich.logging import RichHandler
-from rich.progress import BarColumn, Progress, SpinnerColumn, TaskProgressColumn, TextColumn
+from rich.progress import BarColumn, Progress, SpinnerColumn, TaskID, TaskProgressColumn, TextColumn
 from rich.table import Table
 from rich.tree import Tree
 
@@ -32,7 +32,7 @@ from .exceptions import (
     BLETimeoutError,
     OpenDisplayError,
 )
-from .models.config import GlobalConfig
+from .models.config import GlobalConfig, SensorData
 from .models.enums import (
     PANEL_IC_NAMES,
     BinaryInputType,
@@ -54,6 +54,9 @@ from .models.enums import (
 )
 from .models.firmware import FirmwareVersion
 from .partial import PartialState
+from .sensors import SensorReading
+
+_LOGGER = logging.getLogger(__name__)
 
 _T = TypeVar("_T")
 
@@ -338,6 +341,51 @@ def _sensor_name(sensor_type: int) -> str:
 
 
 @dataclass(frozen=True)
+class _SensorRow:
+    """A configured sensor paired with its current reading, if it has one."""
+
+    sensor: SensorData
+    reading: SensorReading | None
+
+
+def _sensor_rows(ctx: _InfoContext) -> list[_SensorRow]:
+    """Pair each configured sensor with its live reading."""
+    if not ctx.config:
+        return []
+    return [
+        _SensorRow(sensor=sensor, reading=ctx.sensor_readings.get(sensor.instance_number))
+        for sensor in ctx.config.sensors
+    ]
+
+
+def _sensor_line(row: _SensorRow) -> str:
+    """Tree line for one sensor, with live values appended when available."""
+    sensor = row.sensor
+    line = f"Sensor {sensor.instance_number} {_sensor_name(sensor.sensor_type)}  (bus {sensor.bus_id})"
+    values = [
+        f"{value:.1f} {unit}"
+        for value, unit in (
+            (row.reading.temperature_c if row.reading else None, "°C"),
+            (row.reading.humidity_percent if row.reading else None, "%RH"),
+        )
+        if value is not None
+    ]
+    return f"{line}  {'  '.join(values)}" if values else line
+
+
+def _sensor_entry(row: _SensorRow) -> dict[str, Any]:
+    """JSON object for one sensor; live values are null when unavailable."""
+    sensor = row.sensor
+    return {
+        "instance": sensor.instance_number,
+        "type": _sensor_name(sensor.sensor_type),
+        "bus": sensor.bus_id,
+        "temperature_c": row.reading.temperature_c if row.reading else None,
+        "humidity_percent": row.reading.humidity_percent if row.reading else None,
+    }
+
+
+@dataclass(frozen=True)
 class _InfoContext:
     """Everything the info report renders, gathered once from the device."""
 
@@ -350,6 +398,8 @@ class _InfoContext:
     color_scheme_name: str
     rotation: Any
     board_type_name: str | None
+    # Live sensor values by instance number; empty when none could be read.
+    sensor_readings: dict[int, SensorReading] = field(default_factory=dict)
 
     @property
     def display(self) -> Any:
@@ -752,9 +802,9 @@ _INFO_LIST_SECTIONS: tuple[_ListSection, ...] = (
         title="Sensors",
         key="sensors",
         json_parent="hardware",
-        items=lambda c: c.config.sensors if c.config else [],
-        line=lambda s: f"Sensor {s.instance_number} {_sensor_name(s.sensor_type)}  (bus {s.bus_id})",
-        entry=lambda s: {"instance": s.instance_number, "type": _sensor_name(s.sensor_type), "bus": s.bus_id},
+        items=_sensor_rows,
+        line=_sensor_line,
+        entry=_sensor_entry,
     ),
     _ListSection(
         title="Buttons",
@@ -910,6 +960,25 @@ def _cmd_info(args: argparse.Namespace) -> None:
     _run(_info(_device_kwargs(args.device, key, args.timeout, args.host, args.port, args.tls), args.output_json))
 
 
+async def _read_sensors(device: OpenDisplayDevice, progress: Progress, task: TaskID) -> dict[int, SensorReading]:
+    """Read live sensor values, keyed by instance number.
+
+    Best-effort: firmware too old for READ_MSD (0x0044) still reports its sensor
+    hardware, just without values, so a failure here degrades the report rather
+    than failing the command.
+    """
+    if not device.config or not device.config.sensors:
+        return {}
+
+    progress.update(task, description="Reading sensors...")
+    try:
+        readings = await device.read_sensors()
+    except OpenDisplayError as exc:
+        _LOGGER.debug("Could not read sensor values: %s", exc)
+        return {}
+    return {reading.instance_number: reading for reading in readings}
+
+
 async def _info(device_kwargs: dict[str, Any], output_json: bool) -> None:
     try:
         with _spinner() as progress:
@@ -929,6 +998,7 @@ async def _info(device_kwargs: dict[str, Any], output_json: bool) -> None:
                     color_scheme_name=device.color_scheme.name,
                     rotation=display.rotation_enum if display else device.rotation,
                     board_type_name=device.get_board_type_name() if config else None,
+                    sensor_readings=await _read_sensors(device, progress, task),
                 )
     except OpenDisplayError as exc:
         _handle_ble_error(exc)

@@ -53,6 +53,7 @@ from .commands import (
     build_pipe_write_start_command,
     build_read_config_command,
     build_read_fw_version_command,
+    build_read_msd_command,
     build_reboot_command,
     build_write_config_command,
 )
@@ -68,6 +69,7 @@ from .responses import (
     parse_pipe_data_ack,
     parse_pipe_data_nack,
     parse_pipe_start_response,
+    parse_read_msd,
     unpack_ack_ranges,
     validate_ack_response,
 )
@@ -94,6 +96,7 @@ __all__ = [
     "TIMEOUT_PIPE_START",
     "build_read_config_command",
     "build_read_fw_version_command",
+    "build_read_msd_command",
     "build_enter_dfu_command",
     "build_deep_sleep_command",
     "build_reboot_command",
@@ -132,6 +135,7 @@ __all__ = [
     "calculate_config_crc",
     "validate_ack_response",
     "parse_firmware_version",
+    "parse_read_msd",
     "PipeParams",
     "classify_pipe_frame",
     "parse_pipe_start_response",

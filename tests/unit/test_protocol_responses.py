@@ -5,6 +5,7 @@ import re
 import pytest
 
 from opendisplay.exceptions import InvalidResponseError, NfcNotSupportedError, NfcWriteError, ProtocolError
+from opendisplay.models.advertisement import parse_advertisement
 from opendisplay.protocol.commands import CommandCode
 from opendisplay.protocol.responses import (
     NFC_ERROR_MESSAGES,
@@ -12,6 +13,7 @@ from opendisplay.protocol.responses import (
     NFC_STATUS_WRITE_OK,
     check_response_type,
     parse_firmware_version,
+    parse_read_msd,
     strip_command_echo,
     unpack_command_code,
     validate_ack_response,
@@ -341,3 +343,38 @@ class TestNfcExceptions:
         """
         exc = NfcNotSupportedError()
         assert "may not support" in str(exc).lower()
+
+
+class TestParseReadMsd:
+    """READ_MSD (0x0044) returns the same 16 bytes the device advertises."""
+
+    MSD = bytes.fromhex("4624") + bytes(11) + bytes([125, 200, 0x10])
+
+    def test_parses_payload(self) -> None:
+        assert parse_read_msd(bytes.fromhex("0044") + self.MSD) == self.MSD
+
+    def test_accepts_ack_high_bit_echo(self) -> None:
+        assert parse_read_msd(bytes.fromhex("8044") + self.MSD) == self.MSD
+
+    def test_rejects_wrong_echo(self) -> None:
+        with pytest.raises(InvalidResponseError, match="echo mismatch"):
+            parse_read_msd(bytes.fromhex("0043") + self.MSD)
+
+    def test_rejects_short_response(self) -> None:
+        with pytest.raises(InvalidResponseError, match="echo mismatch"):
+            parse_read_msd(b"\x00")
+
+    def test_rejects_wrong_payload_length(self) -> None:
+        with pytest.raises(InvalidResponseError, match="must be 16 bytes"):
+            parse_read_msd(bytes.fromhex("0044") + self.MSD[:-1])
+
+    def test_output_feeds_advertisement_parser(self) -> None:
+        """The record keeps its company ID, which parse_advertisement strips."""
+        msd = bytes.fromhex("4624") + bytes(7) + bytes.fromhex("d7c109") + bytes(1) + bytes([125, 200, 0x10])
+
+        adv = parse_advertisement(parse_read_msd(bytes.fromhex("0044") + msd))
+
+        assert adv.format_version == "v1"
+        reading = adv.sht40_reading()
+        assert reading is not None
+        assert reading.temperature_c == 22.4

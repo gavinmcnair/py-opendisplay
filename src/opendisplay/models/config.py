@@ -13,6 +13,7 @@ from typing import ClassVar
 
 from epaper_dithering import ColorScheme
 
+from .advertisement import SHT40_DEFAULT_MSD_START
 from .enums import (
     ActiveLevel,
     BinaryInputType,
@@ -501,6 +502,21 @@ class SensorData:
             return SensorType(self.sensor_type)
         except ValueError:
             return self.sensor_type
+
+    @property
+    def sht40_msd_start_byte(self) -> int:
+        """Offset of this SHT40's readings in the advertisement's dynamic block.
+
+        Mirrors the firmware's sht40_msd_start(): 0 and 0xFF both mean "use the
+        default slot", so callers never have to re-derive that rule.
+
+        This rule is specific to the SHT40. The fuel gauges (BQ27220, NPM1300)
+        read msd_data_start_byte literally -- 0 means byte 0, and 0xFF means
+        "do not publish" -- so they must not use this property.
+        """
+        if self.msd_data_start_byte in (0, 0xFF):
+            return SHT40_DEFAULT_MSD_START
+        return self.msd_data_start_byte
 
     SIZE: ClassVar[int] = 30
 
