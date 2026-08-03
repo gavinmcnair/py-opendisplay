@@ -26,6 +26,18 @@
   ACK streams that never make progress (previously loops without a progress
   guarantee, reachable only with buggy/hostile firmware).
 
+## [7.15.0](https://github.com/OpenDisplay/py-opendisplay/compare/v7.14.2...v7.15.0) (2026-08-03)
+
+
+### Features
+
+* **sensors:** expose SHT40 temperature and humidity readings ([1656a2a](https://github.com/OpenDisplay/py-opendisplay/commit/1656a2aa67540a383ffe3db717eb365af405f776))
+
+
+### Bug Fixes
+
+* **advertisement:** stop tracking dynamic bytes that are not buttons ([54b04b7](https://github.com/OpenDisplay/py-opendisplay/commit/54b04b76534ace31963865f23e436ebf1adcb771))
+
 ## [7.14.2](https://github.com/OpenDisplay/py-opendisplay/compare/v7.14.1...v7.14.2) (2026-07-30)
 
 
