@@ -52,6 +52,7 @@ from .exceptions import (
     TruncatedConfigError,
 )
 from .landing import build_landing_url
+from .models.advertisement import AdvertisementData, parse_advertisement
 from .models.buzzer_activate import BuzzerActivateConfig
 from .models.capabilities import DeviceCapabilities
 from .models.config import GlobalConfig
@@ -108,6 +109,7 @@ from .protocol import (
     build_pipe_write_start_command,
     build_read_config_command,
     build_read_fw_version_command,
+    build_read_msd_command,
     build_reboot_command,
     build_write_config_command,
     classify_pipe_frame,
@@ -135,10 +137,12 @@ from .protocol.responses import (
     is_compressed_failure_frame,
     parse_authenticate_challenge,
     parse_authenticate_success,
+    parse_read_msd,
     strip_command_echo,
     unpack_command_code,
     validate_nfc_response,
 )
+from .sensors import SensorReading, read_sensor_values
 from .transport import BLEConnection, TcpTransport, Transport
 
 if TYPE_CHECKING:
@@ -1139,6 +1143,42 @@ class OpenDisplayDevice:  # pylint: disable=too-many-instance-attributes
         )
 
         return self._fw_version
+
+    @_serialized
+    async def read_msd(self) -> AdvertisementData:
+        """Read the device's manufacturer-specific data record.
+
+        Returns the same 16 bytes the device broadcasts in its advertisement,
+        but over the open connection -- so it works on transports where no BLE
+        advertisement is observable, and needs no scan.
+
+        Returns:
+            The parsed record, including the dynamic block that carries live
+            sensor readings. Use :meth:`read_sensors` to decode those.
+
+        Raises:
+            InvalidResponseError: If the device returns a malformed record
+        """
+        _LOGGER.debug("Reading MSD from device %s", self.mac_address)
+
+        await self._write(build_read_msd_command())
+        response = await self._read(self.TIMEOUT_ACK)
+
+        return parse_advertisement(parse_read_msd(response))
+
+    async def read_sensors(self) -> list[SensorReading]:
+        """Read live values from the device's configured sensors.
+
+        Combines the device config (which sensors exist, and where each one's
+        bytes sit in the MSD) with a fresh :meth:`read_msd`.
+
+        Returns:
+            One entry per sensor with a usable reading. Empty when the device
+            has no sensors configured, or none currently has a valid reading.
+        """
+        if not self.config or not self.config.sensors:
+            return []
+        return read_sensor_values(self.config, await self.read_msd())
 
     @_serialized
     async def reboot(self) -> None:

@@ -2,7 +2,7 @@
 
 import pytest
 
-from opendisplay.models.config import BinaryInputs, DisplayConfig, ManufacturerData, PowerOption
+from opendisplay.models.config import BinaryInputs, DisplayConfig, ManufacturerData, PowerOption, SensorData
 from opendisplay.models.enums import (
     BoardManufacturer,
     DIYBoardType,
@@ -197,3 +197,22 @@ class TestBinaryInputsPublishedButtonByteIndex:
 
     def test_returns_none_for_index_past_block(self) -> None:
         assert self._inputs(11).published_button_byte_index is None
+
+
+class TestSensorDataMsdStartByte:
+    """The firmware treats 0 and 0xFF as 'use the default slot' (sht40_msd_start)."""
+
+    def test_zero_means_default_slot(self) -> None:
+        sensor = SensorData(instance_number=0, sensor_type=4, bus_id=1, msd_data_start_byte=0)
+
+        assert sensor.sht40_msd_start_byte == 7
+
+    def test_ff_means_default_slot(self) -> None:
+        sensor = SensorData(instance_number=0, sensor_type=4, bus_id=1, msd_data_start_byte=0xFF)
+
+        assert sensor.sht40_msd_start_byte == 7
+
+    def test_explicit_offset_is_kept(self) -> None:
+        sensor = SensorData(instance_number=0, sensor_type=4, bus_id=1, msd_data_start_byte=3)
+
+        assert sensor.sht40_msd_start_byte == 3

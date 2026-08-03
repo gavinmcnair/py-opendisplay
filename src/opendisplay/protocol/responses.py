@@ -280,6 +280,35 @@ def parse_firmware_version(data: bytes) -> FirmwareVersion:
     }
 
 
+MSD_LENGTH = 16  # company_id:2 + dynamic:11 + chip_temp:1 + battery_low:1 + status:1
+
+
+def parse_read_msd(data: bytes) -> bytes:
+    """Parse a READ_MSD response into the raw 16-byte MSD record.
+
+    Format: [echo:2][msd:16]
+
+    Args:
+        data: Raw READ_MSD response
+
+    Returns:
+        The 16-byte manufacturer-specific data record, still carrying its
+        leading company ID -- ``parse_advertisement`` accepts it as-is.
+
+    Raises:
+        InvalidResponseError: If the echo or length is wrong
+    """
+    echo = unpack_command_code(data) if len(data) >= 2 else None
+    if echo not in (0x0044, 0x0044 | RESPONSE_HIGH_BIT_FLAG):
+        raise InvalidResponseError(f"READ_MSD echo mismatch: expected 0x0044, got {echo and f'0x{echo:04x}'}")
+
+    msd = data[2:]
+    if len(msd) != MSD_LENGTH:
+        raise InvalidResponseError(f"READ_MSD payload must be {MSD_LENGTH} bytes, got {len(msd)}")
+
+    return msd
+
+
 # ─── PIPE_WRITE (0x0080-0x0082) sliding-window responses ──────────────────────
 
 # 0x0080 START NACK error codes (Part 1 §1.1)

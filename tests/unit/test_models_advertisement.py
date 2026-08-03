@@ -7,6 +7,7 @@ from opendisplay.models.advertisement import (
     AdvertisementTracker,
     TouchTracker,
     decode_button_event,
+    decode_sht40,
     parse_advertisement,
 )
 
@@ -502,3 +503,127 @@ def test_tracker_with_no_button_bytes_emits_nothing() -> None:
     tracker.update("AA", parse_advertisement(_v1_payload(_dynamic(b0=0x28))))
 
     assert tracker.update("AA", parse_advertisement(_v1_payload(_dynamic(b0=0x4C)))) == []
+
+
+# ── SHT40 sensor readings ─────────────────────────────────────────────────────
+
+
+def _encode_sht40(temp_deci: int, rh_centi: int) -> bytes:
+    """Encode a reading exactly as the firmware does (sensor_sht40.cpp)."""
+    temp_units = temp_deci + 400
+    rh_deci = (rh_centi + 5) // 10
+    packed = (rh_deci & 0x3FF) | (temp_units << 10)
+    return bytes([packed & 0xFF, (packed >> 8) & 0xFF, (packed >> 16) & 0xFF])
+
+
+def _dynamic_with_sht40(block: bytes, start_byte: int = 7) -> bytes:
+    """An 11-byte dynamic block carrying a 3-byte SHT40 reading."""
+    dynamic = bytearray(11)
+    dynamic[start_byte : start_byte + 3] = block
+    return bytes(dynamic)
+
+
+def test_decode_sht40_known_vector() -> None:
+    """Decodes the firmware's own encoding of 22.4 C / 47.1 %RH."""
+    reading = decode_sht40(bytes.fromhex("d7c109"))
+
+    assert reading is not None
+    assert reading.temperature_c == pytest.approx(22.4)
+    assert reading.humidity_percent == pytest.approx(47.1)
+    assert reading.start_byte == 7
+    assert reading.raw == bytes.fromhex("d7c109")
+
+
+@pytest.mark.parametrize(
+    ("temp_deci", "rh_centi"),
+    [
+        (-400, 100),  # temperature floor
+        (1250, 10000),  # both range ceilings
+        (0, 0),  # humidity floor
+        (0, 5000),
+        (224, 4712),
+        (-123, 8888),
+    ],
+)
+def test_decode_sht40_round_trips_firmware_encoding(temp_deci: int, rh_centi: int) -> None:
+    """Every value the firmware can encode decodes back to itself."""
+    reading = decode_sht40(_encode_sht40(temp_deci, rh_centi))
+
+    assert reading is not None
+    assert reading.temperature_c == pytest.approx(temp_deci / 10.0)
+    assert reading.humidity_percent == pytest.approx(round(rh_centi / 10) / 10.0)
+
+
+def test_decode_sht40_read_failure_sentinel() -> None:
+    """FF FF FF is the firmware's explicit read-failure marker, not a reading."""
+    assert decode_sht40(b"\xff\xff\xff") is None
+
+
+def test_decode_sht40_unwritten_slot() -> None:
+    """00 00 00 decodes to a plausible -40 C / 0 %RH but means 'never written'.
+
+    This is the one lossy case: a real -40.0 C at exactly 0 %RH encodes to the
+    same three zero bytes as a slot the firmware never touched. Reporting it is
+    the worse failure -- it would write a hard -40 C into consumers' long-term
+    statistics -- so the ambiguous pattern is treated as "no reading".
+    """
+    assert decode_sht40(b"\x00\x00\x00") is None
+    assert decode_sht40(_encode_sht40(-400, 0)) is None
+
+
+def test_decode_sht40_rejects_wrong_length() -> None:
+    with pytest.raises(ValueError, match="must be 3 bytes"):
+        decode_sht40(b"\x01\x02")
+
+
+def test_sht40_reading_from_advertisement() -> None:
+    """A v1 advertisement decodes the block at the configured offset."""
+    payload = _v1_payload(_dynamic_with_sht40(bytes.fromhex("d7c109"), start_byte=7))
+
+    reading = parse_advertisement(payload).sht40_reading(7)
+
+    assert reading is not None
+    assert reading.temperature_c == pytest.approx(22.4)
+    assert reading.humidity_percent == pytest.approx(47.1)
+
+
+def test_sht40_reading_defaults_to_firmware_slot() -> None:
+    """The default start byte matches the firmware's own default of 7."""
+    payload = _v1_payload(_dynamic_with_sht40(bytes.fromhex("d7c109"), start_byte=7))
+
+    assert parse_advertisement(payload).sht40_reading() is not None
+
+
+def test_sht40_reading_at_relocated_offset() -> None:
+    """Config can move the block anywhere that fits in the dynamic area."""
+    payload = _v1_payload(_dynamic_with_sht40(bytes.fromhex("d7c109"), start_byte=0))
+    adv = parse_advertisement(payload)
+
+    assert adv.sht40_reading(0) is not None
+    assert adv.sht40_reading(7) is None  # zeroed elsewhere → unwritten
+
+
+@pytest.mark.parametrize("start_byte", [-1, 9, 11, 99])
+def test_sht40_reading_rejects_out_of_range_offset(start_byte: int) -> None:
+    """A 3-byte block must fit the 11-byte dynamic area (firmware caps start at 8)."""
+    payload = _v1_payload(_dynamic_with_sht40(bytes.fromhex("d7c109")))
+
+    assert parse_advertisement(payload).sht40_reading(start_byte) is None
+
+
+def test_sht40_reading_is_none_for_legacy_advertisement() -> None:
+    """Legacy advertisements carry no dynamic block at all."""
+    legacy = bytes.fromhex("0236006c00c301") + b"\x6e\x0f" + b"\x16" + b"\x01"
+
+    assert parse_advertisement(legacy).sht40_reading() is None
+
+
+def test_chip_temperature_is_not_the_sensor_reading() -> None:
+    """The advertisement's temperature_c is the MCU's, distinct from the SHT40's."""
+    payload = _v1_payload(_dynamic_with_sht40(bytes.fromhex("d7c109")), temperature_c=31.0)
+    adv = parse_advertisement(payload)
+
+    reading = adv.sht40_reading()
+    assert reading is not None
+    assert adv.temperature_c == pytest.approx(31.0)
+    assert reading.temperature_c == pytest.approx(22.4)

@@ -5,7 +5,9 @@ from .advertisement import (
     AdvertisementTracker,
     ButtonChangeEvent,
     ButtonEventData,
+    Sht40Reading,
     decode_button_event,
+    decode_sht40,
     parse_advertisement,
 )
 from .buzzer_activate import BuzzerActivateConfig, BuzzerPattern, BuzzerStep, note_to_index
@@ -59,6 +61,8 @@ __all__ = [
     "AdvertisementTracker",
     "ButtonChangeEvent",
     "ButtonEventData",
+    "Sht40Reading",
+    "decode_sht40",
     "parse_advertisement",
     "decode_button_event",
     "ActiveLevel",

@@ -9,6 +9,7 @@ stay absent from the report.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any
 
 import pytest
@@ -31,7 +32,8 @@ from opendisplay.models.config import (
     TouchController,
     WifiConfig,
 )
-from opendisplay.models.enums import LedType
+from opendisplay.models.enums import LedType, SensorType
+from opendisplay.sensors import SensorReading
 
 _FW = {"major": 2, "minor": 26, "patch": 0, "sha": "987c6d9"}
 
@@ -513,3 +515,90 @@ def test_report_survives_missing_config() -> None:
     out = _text(None)
     assert "OD405BD8" in out
     assert "2.26" in out
+
+
+# ── sensor readings ──────────────────────────────────────────────────────────
+
+
+def _sht40(instance: int = 0, start_byte: int = 7) -> SensorData:
+    return SensorData(
+        instance_number=instance,
+        sensor_type=SensorType.SHT40,
+        bus_id=2,
+        i2c_addr_7bit=0x44,
+        msd_data_start_byte=start_byte,
+        reserved=b"\x00" * 24,
+    )
+
+
+def _ctx_with_readings(config: GlobalConfig, readings: dict[int, SensorReading]) -> _InfoContext:
+    return replace(_ctx(config), sensor_readings=readings)
+
+
+def _reading(instance: int = 0, temperature_c: float = 22.4, humidity_percent: float = 47.1) -> SensorReading:
+    return SensorReading(
+        instance_number=instance,
+        sensor_type=int(SensorType.SHT40),
+        sensor_type_enum=SensorType.SHT40,
+        temperature_c=temperature_c,
+        humidity_percent=humidity_percent,
+    )
+
+
+def _tree_text(ctx: _InfoContext) -> str:
+    console = Console(width=120, record=True, force_terminal=False)
+    console.print(_build_info_tree(ctx))
+    return console.export_text()
+
+
+def test_sensor_line_shows_live_values() -> None:
+    ctx = _ctx_with_readings(_config(sensors=[_sht40()]), {0: _reading()})
+
+    out = _tree_text(ctx)
+
+    assert "SHT40" in out
+    assert "22.4 °C" in out
+    assert "47.1 %RH" in out
+
+
+def test_sensor_line_without_reading_is_unchanged() -> None:
+    """A sensor we could not read still reports its hardware."""
+    ctx = _ctx_with_readings(_config(sensors=[_sht40()]), {})
+
+    out = _tree_text(ctx)
+
+    assert "Sensor 0" in out
+    assert "bus 2" in out
+    assert "°C" not in out.split("Sensors")[1]
+
+
+def test_sensor_json_carries_readings() -> None:
+    ctx = _ctx_with_readings(_config(sensors=[_sht40()]), {0: _reading()})
+
+    entry = _info_to_json(ctx)["hardware"]["sensors"][0]
+
+    assert entry["instance"] == 0
+    assert entry["type"] == "SHT40"
+    assert entry["bus"] == 2
+    assert entry["temperature_c"] == 22.4
+    assert entry["humidity_percent"] == 47.1
+
+
+def test_sensor_json_nulls_when_unread() -> None:
+    ctx = _ctx_with_readings(_config(sensors=[_sht40()]), {})
+
+    entry = _info_to_json(ctx)["hardware"]["sensors"][0]
+
+    assert entry["temperature_c"] is None
+    assert entry["humidity_percent"] is None
+
+
+def test_readings_match_their_own_sensor_instance() -> None:
+    """Two sensors, one readable: the value must not leak onto the other row."""
+    config = _config(sensors=[_sht40(instance=0), _sht40(instance=1, start_byte=1)])
+    ctx = _ctx_with_readings(config, {1: _reading(instance=1, temperature_c=18.2)})
+
+    entries = _info_to_json(ctx)["hardware"]["sensors"]
+
+    assert entries[0]["temperature_c"] is None
+    assert entries[1]["temperature_c"] == 18.2

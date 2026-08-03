@@ -190,6 +190,7 @@ class SensorType(IntEnum):
     AXP2101_PMIC = 3
     SHT40 = 4
     BQ27220 = 5
+    NPM1300 = 6  # Nordic nPM1300 PMIC (default I2C 0x6B)
 
 
 class WifiEncryption(IntEnum):

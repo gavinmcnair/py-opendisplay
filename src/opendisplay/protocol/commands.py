@@ -20,6 +20,7 @@ class CommandCode(IntEnum):
 
     # Firmware commands
     READ_FW_VERSION = 0x0043  # Read firmware version
+    READ_MSD = 0x0044  # Read the 16-byte manufacturer-specific data record
     REBOOT = 0x000F  # Reboot device
 
     # Authentication command (firmware with encryption support)
@@ -125,6 +126,19 @@ def build_read_fw_version_command() -> bytes:
         Command bytes: 0x0043 (2 bytes, big-endian)
     """
     return CommandCode.READ_FW_VERSION.to_bytes(2, byteorder="big")
+
+
+def build_read_msd_command() -> bytes:
+    """Build command to read the manufacturer-specific data record.
+
+    The MSD holds the same 16 bytes the device broadcasts in its advertisement,
+    including the dynamic block that carries live sensor readings -- so this is
+    the connected equivalent of listening for an advertisement.
+
+    Returns:
+        Command bytes: 0x0044 (2 bytes, big-endian)
+    """
+    return CommandCode.READ_MSD.to_bytes(2, byteorder="big")
 
 
 def build_reboot_command() -> bytes:

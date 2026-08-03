@@ -36,10 +36,12 @@ from .models.advertisement import (
     AdvertisementTracker,
     ButtonChangeEvent,
     ButtonEventData,
+    Sht40Reading,
     TouchChangeEvent,
     TouchEventData,
     TouchTracker,
     decode_button_event,
+    decode_sht40,
     parse_advertisement,
 )
 from .models.buzzer_activate import BuzzerActivateConfig, BuzzerPattern, BuzzerStep, note_to_index
@@ -79,6 +81,7 @@ from .models.enums import (
     RefreshMode,
     Rotation,
     SeeedBoardType,
+    SensorType,
     SolumBoardType,
     TouchIcType,
     WaveshareBoardType,
@@ -90,6 +93,7 @@ from .models.led_flash import LedFlashConfig, LedFlashStep
 from .ota import find_nrf_dfu_device, perform_nrf_dfu, perform_silabs_ota
 from .partial import PartialState
 from .protocol import MANUFACTURER_ID, SERVICE_UUID
+from .sensors import SensorReading, read_sensor_values
 from .transport import BleTransport, TcpTransport, Transport
 
 __version__ = "0.1.0"
@@ -146,6 +150,9 @@ __all__ = [
     "firmware_ota_asset",
     "firmware_release_repo",
     "SensorData",
+    "SensorReading",
+    "SensorType",
+    "Sht40Reading",
     "DataBus",
     "BinaryInputs",
     "PassiveBuzzer",
@@ -189,7 +196,9 @@ __all__ = [
     "get_board_type_name",
     "get_manufacturer_name",
     # Utilities
+    "decode_sht40",
     "parse_advertisement",
+    "read_sensor_values",
     "decode_button_event",
     "voltage_to_percent",
     "build_landing_url",

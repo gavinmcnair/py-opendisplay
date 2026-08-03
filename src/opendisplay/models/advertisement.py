@@ -7,6 +7,22 @@ import time
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 
+# SHT40 temperature/humidity readings, bit-packed into 3 bytes of the v1 dynamic
+# block. Firmware writes them as a 24-bit little-endian word (21 bits used):
+#   v = (rh_deci & 0x3FF) | ((t_deci + 400) << 10)
+# See sensor_sht40.cpp write_sht40_msd() / opendisplay_sensor_sht40.c.
+SHT40_MSD_LENGTH = 3
+SHT40_DEFAULT_MSD_START = 7  # firmware default when msd_data_start_byte is 0 or 0xFF
+SHT40_MAX_MSD_START = 8  # a 3-byte block must fit the 11-byte dynamic area
+_SHT40_RH_MASK = 0x3FF
+_SHT40_TEMP_MASK = 0x7FF
+_SHT40_TEMP_SHIFT = 10
+_SHT40_TEMP_BIAS = 400  # temperature is stored as (deci-degrees + 400) to avoid a sign bit
+_SHT40_MAX_RH_DECI = 1000  # 100.0 %RH
+_SHT40_MAX_TEMP_UNITS = 1650  # (125.0 C * 10) + bias, the SHT40's upper limit
+_SHT40_UNWRITTEN = 0x000000  # slot the firmware has never written
+_SHT40_INVALID = 0xFFFFFF  # firmware's explicit read-failure sentinel
+
 
 @dataclass
 class AdvertisementData:
@@ -35,7 +51,9 @@ class AdvertisementData:
 
     Attributes:
         battery_mv: Battery voltage in millivolts
-        temperature_c: Chip temperature in Celsius
+        temperature_c: MCU chip temperature in Celsius. This is the microcontroller's
+            own temperature, *not* an attached sensor -- for a board with an SHT40,
+            read ambient temperature and humidity via :meth:`sht40_reading` instead.
         loop_counter: Incrementing counter for each advertisement
         format_version: Parsed advertisement format ("legacy" or "v1")
         reboot_flag: Reboot flag from status byte (v1 only)
@@ -118,6 +136,27 @@ class AdvertisementData:
             y=y,
         )
 
+    def sht40_reading(self, start_byte: int = SHT40_DEFAULT_MSD_START) -> Sht40Reading | None:
+        """Decode a 3-byte SHT40 block from dynamic_data at the given offset (v1 only).
+
+        Args:
+            start_byte: Offset within the 11-byte dynamic return block (0-8). Pass
+                ``SensorData.sht40_msd_start_byte`` from the device config; the
+                default matches the firmware's own default slot.
+
+        Returns:
+            Parsed temperature and humidity, or None if this is not a v1
+            advertisement, the block does not fit, or the sensor has no valid
+            reading (not yet read, or the firmware's read failed).
+        """
+        if self.format_version != "v1":
+            return None
+        if not 0 <= start_byte <= SHT40_MAX_MSD_START:
+            return None
+        if start_byte + SHT40_MSD_LENGTH > len(self.dynamic_data):
+            return None
+        return decode_sht40(self.dynamic_data[start_byte : start_byte + SHT40_MSD_LENGTH], start_byte)
+
 
 @dataclass(frozen=True)
 class ButtonEventData:
@@ -185,6 +224,16 @@ class TouchChangeEvent:
     timestamp: float
 
 
+@dataclass(frozen=True)
+class Sht40Reading:
+    """Decoded SHT40 measurement from a 3-byte block in v1 dynamic return data."""
+
+    start_byte: int
+    temperature_c: float
+    humidity_percent: float
+    raw: bytes
+
+
 def decode_button_event(raw: int, byte_index: int) -> ButtonEventData:
     """Decode one dynamic return byte into button fields."""
     return ButtonEventData(
@@ -193,6 +242,50 @@ def decode_button_event(raw: int, byte_index: int) -> ButtonEventData:
         button_id=raw & 0x07,
         press_count=(raw >> 3) & 0x0F,
         pressed=bool((raw >> 7) & 0x01),
+    )
+
+
+def decode_sht40(raw: bytes, start_byte: int = SHT40_DEFAULT_MSD_START) -> Sht40Reading | None:
+    """Decode a 3-byte SHT40 block into temperature and humidity.
+
+    Two byte patterns are not measurements and decode to None:
+
+    - ``FF FF FF`` -- the firmware's explicit read-failure sentinel. It decodes to
+      164.7 C / 102.3 %RH, which the range checks below reject.
+    - ``00 00 00`` -- a slot the firmware has never written. It decodes to exactly
+      -40.0 C / 0.0 %RH, the simultaneous floor of *both* ranges, so the range
+      checks alone would let it through as a plausible-looking reading. Reporting
+      it would write a hard -40 C into consumers' long-term statistics, so it is
+      rejected outright; a real reading sitting on both floors at once is not
+      physically meaningful.
+
+    Args:
+        raw: Exactly 3 bytes, as written by the firmware into the dynamic block.
+        start_byte: Offset the block was read from, recorded on the result.
+
+    Returns:
+        Parsed reading, or None when the block holds no valid measurement.
+
+    Raises:
+        ValueError: If raw is not exactly 3 bytes.
+    """
+    if len(raw) != SHT40_MSD_LENGTH:
+        raise ValueError(f"SHT40 block must be {SHT40_MSD_LENGTH} bytes, got {len(raw)}")
+
+    packed = int.from_bytes(raw, "little")
+    if packed in (_SHT40_UNWRITTEN, _SHT40_INVALID):
+        return None
+
+    rh_deci = packed & _SHT40_RH_MASK
+    temp_units = (packed >> _SHT40_TEMP_SHIFT) & _SHT40_TEMP_MASK
+    if rh_deci > _SHT40_MAX_RH_DECI or temp_units > _SHT40_MAX_TEMP_UNITS:
+        return None
+
+    return Sht40Reading(
+        start_byte=start_byte,
+        temperature_c=(temp_units - _SHT40_TEMP_BIAS) / 10.0,
+        humidity_percent=rh_deci / 10.0,
+        raw=bytes(raw),
     )
 
 
