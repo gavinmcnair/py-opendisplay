@@ -428,3 +428,77 @@ class TestTouchTracker:
         legacy = bytes([0x02, 0x36, 0x00, 0x6C, 0x00, 0xC3, 0x01, 0x55, 0x0F, 0x16, 0x4D])
         adv = parse_advertisement(legacy)
         assert tracker.update(self.ADDRESS, adv, timestamp=1.0) == []
+
+
+# ── tracker byte filtering ────────────────────────────────────────────────────
+
+
+def _dynamic(**by_index: int) -> bytes:
+    """An 11-byte dynamic block with the given bytes set."""
+    block = bytearray(11)
+    for index, value in by_index.items():
+        block[int(index.removeprefix("b"))] = value
+    return bytes(block)
+
+
+def test_tracker_ignores_bytes_no_button_reports_into() -> None:
+    """A sensor or touch byte changing must not look like a button press.
+
+    Byte 1 here stands in for a slot owned by something else (an SHT40 block
+    or a touch coordinate). Only byte 0 is a configured button.
+    """
+    tracker = AdvertisementTracker([0])
+    tracker.update("AA", parse_advertisement(_v1_payload(_dynamic(b0=0x28, b1=0x54))))
+
+    events = tracker.update("AA", parse_advertisement(_v1_payload(_dynamic(b0=0x28, b1=0x4C))))
+
+    assert events == []
+
+
+def test_tracker_without_indices_still_watches_every_byte() -> None:
+    """Historical behaviour is preserved when no indices are given."""
+    tracker = AdvertisementTracker()
+    tracker.update("AA", parse_advertisement(_v1_payload(_dynamic(b1=0x54))))
+
+    events = tracker.update("AA", parse_advertisement(_v1_payload(_dynamic(b1=0x4C))))
+
+    assert [e.byte_index for e in events] == [1]
+
+
+def test_tracker_still_reports_configured_button() -> None:
+    """Filtering must not suppress the bytes that are real buttons."""
+    tracker = AdvertisementTracker([0])
+    tracker.update("AA", parse_advertisement(_v1_payload(_dynamic(b0=0x00))))
+
+    events = tracker.update("AA", parse_advertisement(_v1_payload(_dynamic(b0=0x88))))
+
+    assert [(e.event_type, e.byte_index) for e in events] == [
+        ("button_down", 0),
+        ("press_count_changed", 0),
+    ]
+
+
+def test_tracker_watches_several_button_bytes() -> None:
+    tracker = AdvertisementTracker([0, 5])
+    tracker.update("AA", parse_advertisement(_v1_payload(_dynamic(b0=0x00, b3=0x11, b5=0x00))))
+
+    events = tracker.update("AA", parse_advertisement(_v1_payload(_dynamic(b0=0x88, b3=0x99, b5=0x88))))
+
+    assert sorted(e.byte_index for e in events) == [0, 0, 5, 5]
+
+
+def test_tracker_accepts_any_iterable_of_indices() -> None:
+    tracker = AdvertisementTracker(i for i in (0,))
+    tracker.update("AA", parse_advertisement(_v1_payload(_dynamic(b0=0x00))))
+
+    events = tracker.update("AA", parse_advertisement(_v1_payload(_dynamic(b0=0x88))))
+
+    assert [e.byte_index for e in events] == [0, 0]
+
+
+def test_tracker_with_no_button_bytes_emits_nothing() -> None:
+    """A device whose inputs all publish nothing yields no events at all."""
+    tracker = AdvertisementTracker([])
+    tracker.update("AA", parse_advertisement(_v1_payload(_dynamic(b0=0x28))))
+
+    assert tracker.update("AA", parse_advertisement(_v1_payload(_dynamic(b0=0x4C)))) == []

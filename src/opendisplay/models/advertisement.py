@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import struct
 import time
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 
 
@@ -78,7 +79,13 @@ class AdvertisementData:
 
     @property
     def button_events(self) -> list[ButtonEventData]:
-        """Decode all dynamic return bytes as button event data (v1 only)."""
+        """Decode all dynamic return bytes as button event data (v1 only).
+
+        Every byte is decoded, including those owned by touch controllers and
+        sensors, which produce valid-looking but meaningless button reports.
+        Callers should keep only the indices their config assigns to buttons
+        (see ``BinaryInputs.published_button_byte_index``).
+        """
         if self.format_version != "v1":
             return []
         return [decode_button_event(raw, i) for i, raw in enumerate(self.dynamic_data)]
@@ -193,10 +200,28 @@ class AdvertisementTracker:
     """Track per-device v1 advertisements and emit button transitions.
 
     This is best-effort only: BLE advertisements can be dropped.
+
+    The 11-byte dynamic block is shared: buttons own the bytes their config
+    packets claim, and touch controllers and sensors own the rest. Decoding a
+    byte that belongs to something else yields a valid-looking button report,
+    so a tracker watching every byte emits phantom transitions whenever a
+    touch coordinate or a sensor reading changes.
+
+    Pass ``byte_indices`` to watch only the bytes that are really buttons --
+    ``BinaryInputs.published_button_byte_index`` for each configured input.
+    Omitting it keeps the historical behaviour of watching all 11 bytes.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, byte_indices: Iterable[int] | None = None) -> None:
+        """Initialize the tracker, optionally restricted to button bytes."""
+        self._byte_indices = None if byte_indices is None else frozenset(byte_indices)
         self._last_by_address: dict[str, list[ButtonEventData]] = {}
+
+    def _watched(self, events: list[ButtonEventData]) -> list[ButtonEventData]:
+        """Drop dynamic bytes that no configured button reports into."""
+        if self._byte_indices is None:
+            return events
+        return [event for event in events if event.byte_index in self._byte_indices]
 
     def reset(self, address: str | None = None) -> None:
         """Reset tracker state for one device or all devices."""
@@ -216,7 +241,7 @@ class AdvertisementTracker:
             self._last_by_address.pop(address, None)
             return []
 
-        current = advertisement.button_events
+        current = self._watched(advertisement.button_events)
         previous = self._last_by_address.get(address)
         self._last_by_address[address] = current
 

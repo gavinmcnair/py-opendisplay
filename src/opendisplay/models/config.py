@@ -603,6 +603,20 @@ class BinaryInputs:
     MAX_LADDER_BUTTONS: ClassVar[int] = 4
     MAX_BUTTON_ID: ClassVar[int] = 7  # button id is a 3-bit field in the report byte
     MAX_BUTTON_DATA_BYTE_INDEX: ClassVar[int] = 10  # index into the 11-byte MSD block
+    BUTTON_DATA_NOT_PUBLISHED: ClassVar[int] = 0xFF  # firmware default: report nothing
+
+    @property
+    def published_button_byte_index(self) -> int | None:
+        """Dynamic block byte this input reports into, or None if it publishes none.
+
+        The firmware treats 0xFF (its default) as "not published" and ignores
+        any index past the 11-byte block. Use this to decide which bytes of an
+        advertisement really carry button state -- the rest belong to touch
+        controllers and sensors, and decode into meaningless button reports.
+        """
+        if self.button_data_byte_index > self.MAX_BUTTON_DATA_BYTE_INDEX:
+            return None
+        return self.button_data_byte_index
 
     @classmethod
     def adc_ladder(
