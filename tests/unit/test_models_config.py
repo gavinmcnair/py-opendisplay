@@ -2,7 +2,7 @@
 
 import pytest
 
-from opendisplay.models.config import DisplayConfig, ManufacturerData, PowerOption
+from opendisplay.models.config import BinaryInputs, DisplayConfig, ManufacturerData, PowerOption
 from opendisplay.models.enums import (
     BoardManufacturer,
     DIYBoardType,
@@ -168,3 +168,32 @@ class TestDisplayConfigTransmissionModes:
 
     def test_supports_zip_true_with_multiple_bits_set(self):
         assert self._display(transmission_modes=0x03).supports_zip is True
+
+
+class TestBinaryInputsPublishedButtonByteIndex:
+    """0xFF means 'not published'; the firmware also ignores indices past the block."""
+
+    def _inputs(self, button_data_byte_index: int) -> BinaryInputs:
+        return BinaryInputs(
+            instance_number=0,
+            input_type=1,
+            display_as=1,
+            reserved_pins=b"\x00" * 8,
+            input_flags=0x01,
+            invert=0,
+            pullups=0,
+            pulldowns=0,
+            button_data_byte_index=button_data_byte_index,
+        )
+
+    def test_returns_index_when_published(self) -> None:
+        assert self._inputs(0).published_button_byte_index == 0
+
+    def test_returns_highest_valid_index(self) -> None:
+        assert self._inputs(10).published_button_byte_index == 10
+
+    def test_returns_none_for_not_published(self) -> None:
+        assert self._inputs(0xFF).published_button_byte_index is None
+
+    def test_returns_none_for_index_past_block(self) -> None:
+        assert self._inputs(11).published_button_byte_index is None
