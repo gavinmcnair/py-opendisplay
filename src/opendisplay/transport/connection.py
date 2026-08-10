@@ -12,6 +12,7 @@ from bleak_retry_connector import BleakClientWithServiceCache, establish_connect
 
 from ..exceptions import BLEConnectionError, BLETimeoutError
 from ..protocol import SERVICE_UUID
+from ..protocol.responses import describe_command_code
 
 if TYPE_CHECKING:
     from bleak.backends.characteristic import BleakGATTCharacteristic
@@ -363,7 +364,7 @@ class BLEConnection:
 
     @staticmethod
     def _describe_dropped_frame(frame: bytes) -> str:
-        """Describe a discarded frame as ``0xNNNN (N B)`` for the drain log.
+        """Describe a discarded frame as ``NAME (0xnnnn) (N B)`` for the drain log.
 
         The 2-byte command echo leads every frame in the clear — encrypted
         responses carry it ahead of the nonce — so it identifies the leaking
@@ -372,7 +373,7 @@ class BLEConnection:
         """
         if len(frame) < 2:
             return f"malformed {frame.hex() or '<empty>'} ({len(frame)} B)"
-        return f"0x{int.from_bytes(frame[:2], 'big'):04x} ({len(frame)} B)"
+        return f"{describe_command_code(int.from_bytes(frame[:2], 'big'))} ({len(frame)} B)"
 
     def drain_notifications(self) -> int:
         """Discard any queued notifications and return how many were dropped.

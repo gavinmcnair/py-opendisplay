@@ -25,11 +25,11 @@ def test_drain_notifications_empty_queue_is_noop() -> None:
     assert conn.drain_notifications() == 0
 
 
-def test_drain_notifications_logs_command_echo_of_each_dropped_frame(
+def test_drain_notifications_logs_command_type_of_each_dropped_frame(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """The warning names every dropped frame's echo, so a desync can be traced to
-    the command that leaked it instead of only being reported as a count."""
+    """The warning names every dropped frame's command, so a desync can be traced
+    to the exchange that leaked it instead of only being reported as a count."""
     conn = BLEConnection("AA:BB:CC:DD:EE:FF")
     conn._notification_queue.put_nowait(b"\x00\x40\x00\x01")  # stray READ_CONFIG chunk
     conn._notification_queue.put_nowait(b"\x00\x50\x00")  # duplicated AUTHENTICATE reply
@@ -37,8 +37,17 @@ def test_drain_notifications_logs_command_echo_of_each_dropped_frame(
     with caplog.at_level(logging.WARNING, logger="opendisplay.transport.connection"):
         assert conn.drain_notifications() == 2
 
-    assert "0x0040 (4 B)" in caplog.text
-    assert "0x0050 (3 B)" in caplog.text
+    assert "READ_CONFIG (0x0040) (4 B)" in caplog.text
+    assert "AUTHENTICATE (0x0050) (3 B)" in caplog.text
+
+
+def test_drain_notifications_resolves_ack_and_nack_forms_to_their_command() -> None:
+    """A response carries the ACK high bit or the 0xFF NACK prefix; both must
+    resolve to the originating command rather than logging as unknown codes."""
+    assert BLEConnection._describe_dropped_frame(b"\x80\x40\x00") == "READ_CONFIG ACK (0x8040) (3 B)"
+    assert BLEConnection._describe_dropped_frame(b"\xff\x40\x00\x00") == "READ_CONFIG NACK (0xff40) (4 B)"
+    # Not a known command: reported as bare hex rather than guessed at.
+    assert BLEConnection._describe_dropped_frame(b"\x00\x99") == "0x0099 (2 B)"
 
 
 def test_drain_notifications_describes_frame_too_short_for_an_echo(
