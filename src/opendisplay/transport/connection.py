@@ -238,6 +238,11 @@ class BLEConnection:
             pass
         self._notification_characteristic = None
         self._client = None
+        # This path drops the client directly rather than via disconnect(), and a
+        # retried attempt reuses this object's queue: an attempt that got as far
+        # as starting notifications before failing can have queued a frame that
+        # would otherwise be read as the *next* attempt's first response.
+        self._flush_notification_queue("connect retry")
 
     async def disconnect(self) -> None:
         """Disconnect from device, releasing notifications first."""
@@ -254,6 +259,12 @@ class BLEConnection:
             finally:
                 self._notification_characteristic = None
                 self._client = None
+        # Outside the branch: the link can already be down (dropped underneath us,
+        # or a second disconnect()) and still have left frames queued. Not all
+        # bleak backends invoke disconnected_callback for a caller-initiated
+        # disconnect either, so this path must flush on its own rather than rely
+        # on _on_disconnect having run.
+        self._flush_notification_queue("disconnect")
 
     async def clear_cache(self) -> bool:
         """Clear the GATT services cache for this device.
@@ -329,6 +340,11 @@ class BLEConnection:
         via the registered ``disconnected_callback``.
         """
         _LOGGER.debug("BLE link to %s dropped", self.mac_address)
+        # Flush before notifying the owner: this is the only path guaranteed to
+        # run on an *unexpected* drop (device reboot, out of range, proxy reset),
+        # where disconnect() is never called and leftovers would otherwise ride
+        # into the next connect() on this object.
+        self._flush_notification_queue("link drop")
         if self._disconnected_callback is not None:
             try:
                 self._disconnected_callback()
@@ -345,6 +361,19 @@ class BLEConnection:
         # Put notification in queue for processing
         self._notification_queue.put_nowait(bytes(data))
 
+    @staticmethod
+    def _describe_dropped_frame(frame: bytes) -> str:
+        """Describe a discarded frame as ``0xNNNN (N B)`` for the drain log.
+
+        The 2-byte command echo leads every frame in the clear — encrypted
+        responses carry it ahead of the nonce — so it identifies the leaking
+        command on both plaintext and encrypted paths. Never raises: a frame too
+        short to carry an echo is reported verbatim rather than dropped silently.
+        """
+        if len(frame) < 2:
+            return f"malformed {frame.hex() or '<empty>'} ({len(frame)} B)"
+        return f"0x{int.from_bytes(frame[:2], 'big'):04x} ({len(frame)} B)"
+
     def drain_notifications(self) -> int:
         """Discard any queued notifications and return how many were dropped.
 
@@ -354,17 +383,54 @@ class BLEConnection:
         command and desync every subsequent read by one. Draining before writing
         a command clears such leftovers; in healthy stop-and-wait operation the
         queue is already empty here, so this is a no-op.
+
+        Each dropped frame is logged with its command echo. A bare count says a
+        desync happened but not why; the echo distinguishes a duplicated response
+        (same code as the command just completed) from a frame belonging to an
+        entirely different exchange (a cross-connection or pre-subscription leak).
         """
-        dropped = 0
+        dropped = self._drain_queue()
+        if dropped:
+            _LOGGER.warning(
+                "Discarded %d stale notification(s) before command: %s",
+                len(dropped),
+                ", ".join(dropped),
+            )
+        return len(dropped)
+
+    def _drain_queue(self) -> list[str]:
+        """Empty the notification queue, returning a descriptor per dropped frame.
+
+        Synchronous and non-raising so it is safe to call from bleak's disconnect
+        callback as well as from the pre-command drain.
+        """
+        dropped: list[str] = []
         while True:
             try:
-                self._notification_queue.get_nowait()
+                frame = self._notification_queue.get_nowait()
             except asyncio.QueueEmpty:
-                break
-            dropped += 1
-        if dropped:
-            _LOGGER.warning("Discarded %d stale notification(s) before command", dropped)
-        return dropped
+                return dropped
+            dropped.append(self._describe_dropped_frame(frame))
+
+    def _flush_notification_queue(self, reason: str) -> int:
+        """Discard notifications left over from a link that is gone.
+
+        A frame queued against a dead link can never answer a future command, so
+        carrying it across a reconnect would desync the first read on the new
+        link — this object is reusable, and ``connect()`` after ``disconnect()``
+        keeps the same queue. Called from every disconnect path, including the
+        stack-signalled one, so an unexpected drop flushes as thoroughly as a
+        graceful teardown.
+        """
+        flushed = self._drain_queue()
+        if flushed:
+            _LOGGER.debug(
+                "Flushed %d queued notification(s) on %s: %s",
+                len(flushed),
+                reason,
+                ", ".join(flushed),
+            )
+        return len(flushed)
 
     async def write_command(self, data: bytes, response: bool = True, drain_stale: bool = True) -> None:
         """Write command to device.
