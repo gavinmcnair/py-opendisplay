@@ -44,11 +44,63 @@ def unpack_command_code(data: bytes, offset: int = 0) -> int:
     return int(struct.unpack(">H", data[offset : offset + 2])[0])
 
 
+def describe_command_code(code: int) -> str:
+    """Return a ``NAME (0xnnnn)`` label for a response's command code.
+
+    Resolves the ACK high bit and the ``0xFF`` NACK prefix back to the underlying
+    command, so a frame logged while being dropped names the exchange it came
+    from rather than only its raw code. Unknown codes report bare hex.
+
+    Args:
+        code: 2-byte command code from a response
+
+    Returns:
+        Human-readable label, e.g. ``READ_FW_VERSION (0x0043)``
+    """
+    label = f"0x{code:04x}"
+    if (code >> 8) == 0xFF:
+        base, kind = code & 0xFF, " NACK"
+    elif code & RESPONSE_HIGH_BIT_FLAG:
+        base, kind = code & ~RESPONSE_HIGH_BIT_FLAG, " ACK"
+    else:
+        base, kind = code, ""
+    try:
+        return f"{CommandCode(base).name}{kind} ({label})"
+    except ValueError:
+        return label
+
+
+def matches_command_echo(data: bytes, expected_cmd: CommandCode) -> bool:
+    """Return True if ``data`` opens with ``expected_cmd``'s echo.
+
+    Firmware echoes commands in responses, sometimes with the ACK high bit set;
+    both forms count as a match. Callers use this to tell a response to the
+    command they sent from a frame belonging to some other exchange, which the
+    notification queue cannot distinguish on its own.
+
+    Args:
+        data: Response data from device
+        expected_cmd: Expected command echo
+
+    Returns:
+        True if the leading 2 bytes echo ``expected_cmd``
+    """
+    if len(data) < 2:
+        return False
+    echo = unpack_command_code(data)
+    return echo in (expected_cmd, expected_cmd | RESPONSE_HIGH_BIT_FLAG)
+
+
 def strip_command_echo(data: bytes, expected_cmd: CommandCode) -> bytes:
     """Strip command echo from response data.
 
     Firmware echoes commands in responses, sometimes with high bit set.
     This function removes the 2-byte echo if present.
+
+    A non-matching frame is returned unchanged rather than rejected, so callers
+    that can receive foreign frames must screen them with
+    :func:`matches_command_echo` first — otherwise the echo survives into the
+    payload and is parsed as data.
 
     Args:
         data: Response data from device
@@ -57,10 +109,8 @@ def strip_command_echo(data: bytes, expected_cmd: CommandCode) -> bytes:
     Returns:
         Data with echo stripped (if present), otherwise original data
     """
-    if len(data) >= 2:
-        echo = unpack_command_code(data)
-        if echo in (expected_cmd, expected_cmd | RESPONSE_HIGH_BIT_FLAG):
-            return data[2:]
+    if matches_command_echo(data, expected_cmd):
+        return data[2:]
     return data
 
 

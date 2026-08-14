@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 
 import pytest
 from epaper_dithering import ColorScheme
@@ -10,6 +11,7 @@ from epaper_dithering import ColorScheme
 from opendisplay import OpenDisplayDevice
 from opendisplay.exceptions import (
     BLETimeoutError,
+    ConfigParseError,
     InvalidResponseError,
     ProtocolError,
     TruncatedConfigError,
@@ -100,6 +102,49 @@ def test_interrogate_raises_on_stalled_empty_chunk() -> None:
     device._connection = _ScriptedConn([_FIRST_CHUNK, empty_chunk])  # type: ignore[assignment]
 
     with pytest.raises(TruncatedConfigError, match="stalled"):
+        asyncio.run(device.interrogate())
+
+
+def test_interrogate_ignores_stray_frame_from_another_command(caplog: pytest.LogCaptureFixture) -> None:
+    """A frame belonging to a different exchange must not be spliced into the
+    config: strip_command_echo returns a non-matching frame unchanged, so its
+    echo would be eaten as the chunk-number field and its body appended as data.
+    """
+    device = _make_device()
+    # 90 payload bytes still owed after the first chunk's 10.
+    stray = b"\x00\x43\x01\x00\x28" + b"\xaa" * 20  # firmware-version reply, wrong exchange
+    real_chunk = b"\x00\x40" + b"\x00\x01" + b"\x02" * 90
+    device._connection = _ScriptedConn([_FIRST_CHUNK, stray, real_chunk])  # type: ignore[assignment]
+
+    with caplog.at_level(logging.WARNING, logger="opendisplay.device"), pytest.raises(ConfigParseError):
+        asyncio.run(device.interrogate())
+
+    # Reaching the parser at all proves total_length was satisfied by config
+    # chunks alone: the stray was consumed and dropped rather than appended.
+    assert "Ignoring stray READ_FW_VERSION (0x0043) frame" in caplog.text
+    assert device._connection._responses == []  # type: ignore[attr-defined]
+
+
+def test_interrogate_gives_up_after_too_many_stray_frames() -> None:
+    """Foreign frames are bounded, so a device streaming unrelated frames fails
+    with a clear error rather than renewing the read timeout indefinitely."""
+    device = _make_device()
+    stray = b"\x00\x43\x01\x00\x28"
+    strays: list[bytes | Exception] = [stray] * (OpenDisplayDevice.MAX_STRAY_CONFIG_FRAMES + 1)
+    device._connection = _ScriptedConn([_FIRST_CHUNK, *strays])  # type: ignore[assignment]
+
+    with pytest.raises(ProtocolError, match="frames from other commands"):
+        asyncio.run(device.interrogate())
+
+
+def test_interrogate_still_reports_error_frame_after_a_stray() -> None:
+    """The no-config NACK answers this command, so it is passed through to the
+    caller rather than skipped as a foreign frame."""
+    device = _make_device()
+    stray = b"\x00\x43\x01\x00\x28"
+    device._connection = _ScriptedConn([stray, b"\xff\x40\x00\x00"])  # type: ignore[assignment]
+
+    with pytest.raises(ProtocolError, match="no stored configuration"):
         asyncio.run(device.interrogate())
 
 

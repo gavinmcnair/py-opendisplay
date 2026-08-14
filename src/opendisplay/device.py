@@ -134,7 +134,9 @@ from .protocol.responses import (
     PIPE_START_NACK_PARTIAL_UNSUPPORTED,
     PIPE_START_NACK_RECT_INVALID,
     check_response_type,
+    describe_command_code,
     is_compressed_failure_frame,
+    matches_command_echo,
     parse_authenticate_challenge,
     parse_authenticate_success,
     parse_read_msd,
@@ -446,6 +448,11 @@ class OpenDisplayDevice:  # pylint: disable=too-many-instance-attributes
     """
 
     _ENCRYPTED_RESPONSE_MIN_LEN = 31  # cmd(2) + nonce(16) + payload(1) + tag(12)
+
+    # Foreign frames tolerated while waiting for a config chunk before giving up.
+    # Bounded so a device streaming unrelated frames fails with a clear error
+    # instead of renewing the read timeout indefinitely.
+    MAX_STRAY_CONFIG_FRAMES = 8
 
     # BLE operation timeouts (seconds)
     TIMEOUT_FIRST_CHUNK = 10.0  # First chunk may take longer
@@ -1038,6 +1045,47 @@ class OpenDisplayDevice:  # pylint: disable=too-many-instance-attributes
                 pass
         return bytes.fromhex(self.mac_address.replace(":", ""))[-3:]
 
+    async def _read_config_frame(self, timeout: float) -> bytes:
+        """Read the next READ_CONFIG frame, ignoring frames from other commands.
+
+        The notification queue has no request/response correlation, so a frame
+        belonging to a different exchange — a duplicated response, or one the
+        firmware held in its TX ring until notifications were enabled — can land
+        mid-transfer. It must not reach ``strip_command_echo``, which returns a
+        non-matching frame *unchanged*: its 2-byte echo would then be consumed as
+        the chunk-number field and its body spliced into the config, silently
+        corrupting it (no length check catches this — the loop only counts bytes).
+        Skipping such frames keeps the config read on its own command stream.
+
+        The device's no-config error frame ({0xFF, 0x40, ...}) is passed through
+        rather than skipped: it answers this command and the caller reports it.
+
+        Raises:
+            BLETimeoutError: If no frame arrives within ``timeout``
+            ProtocolError: If more than ``MAX_STRAY_CONFIG_FRAMES`` foreign frames
+                arrive while waiting for this chunk
+        """
+        for _ in range(self.MAX_STRAY_CONFIG_FRAMES + 1):
+            response = await self._read(timeout)
+            if matches_command_echo(response, CommandCode.READ_CONFIG):
+                return response
+            # NACK form of the same command: {0xFF, <cmd low byte>, ...}
+            if len(response) >= 2 and response[0] == 0xFF and response[1] == CommandCode.READ_CONFIG:
+                return response
+            _LOGGER.warning(
+                "Ignoring stray %s frame (%d B) while reading config",
+                (
+                    describe_command_code(unpack_command_code(response))
+                    if len(response) >= 2
+                    else f"malformed {response.hex() or '<empty>'}"
+                ),
+                len(response),
+            )
+        raise ProtocolError(
+            f"Config read aborted: more than {self.MAX_STRAY_CONFIG_FRAMES} frames from other "
+            "commands arrived while waiting for a config chunk"
+        )
+
     @_serialized
     async def interrogate(self) -> GlobalConfig:
         """Read device configuration from device.
@@ -1055,7 +1103,7 @@ class OpenDisplayDevice:  # pylint: disable=too-many-instance-attributes
         await self._write(cmd)
 
         # Read first chunk
-        response = await self._read(self.TIMEOUT_FIRST_CHUNK)
+        response = await self._read_config_frame(self.TIMEOUT_FIRST_CHUNK)
 
         # Firmware answers a device-with-no-config with the 4-byte error frame
         # {0xFF, 0x40, 0x00, 0x00}. Without this check the {0x00,0x00} length
@@ -1078,7 +1126,7 @@ class OpenDisplayDevice:  # pylint: disable=too-many-instance-attributes
         # or returning a partial config.
         while len(tlv_data) < total_length:
             try:
-                next_response = await self._read(self.TIMEOUT_CONFIG_CHUNK)
+                next_response = await self._read_config_frame(self.TIMEOUT_CONFIG_CHUNK)
             except BLETimeoutError as err:
                 raise TruncatedConfigError(
                     f"Config read truncated: device stopped sending chunks at {len(tlv_data)}/{total_length} bytes"
