@@ -26,6 +26,19 @@
   ACK streams that never make progress (previously loops without a progress
   guarantee, reachable only with buggy/hostile firmware).
 
+## [7.16.0](https://github.com/OpenDisplay/py-opendisplay/compare/v7.15.0...v7.16.0) (2026-08-14)
+
+
+### Features
+
+* map 13.3" Spectra 6 split panel to the v2 measured palette ([85eeee2](https://github.com/OpenDisplay/py-opendisplay/commit/85eeee28500938474a8f293245641e0167f4d3c2))
+
+
+### Bug Fixes
+
+* **device:** ignore frames from other commands during a config read ([1e26804](https://github.com/OpenDisplay/py-opendisplay/commit/1e268044ae7802071fc70179340e4ed8094b7843))
+* **transport:** flush the notification queue on every BLE disconnect ([0f39f42](https://github.com/OpenDisplay/py-opendisplay/commit/0f39f42756d51af6ff6ad9f6ca0d3e3e34a339f3))
+
 ## [7.15.0](https://github.com/OpenDisplay/py-opendisplay/compare/v7.14.2...v7.15.0) (2026-08-03)
 
 
