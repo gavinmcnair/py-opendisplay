@@ -5,6 +5,7 @@ from epaper_dithering import (
     MONO_4_26,
     SOLUM_BWR,
     SPECTRA_7_3_6COLOR,
+    SPECTRA_7_3_6COLOR_V2,
     ColorPalette,
     ColorScheme,
 )
@@ -80,6 +81,11 @@ DISPLAY_PALETTE_MAP: dict[tuple[int, ColorScheme], ColorPalette] = {
     (33, ColorScheme.BWR): SOLUM_BWR,
     # 3.97" BWRY (ep397yr_800x480)
     (55, ColorScheme.BWRY): BWRY_3_97,
+    # Spectra 6 13.3" dual-controller (T133A01, Seeed reTerminal E1004). Keyed on
+    # BWGBRY_SPLIT because firmware requires scheme 8 for split panels; same ink
+    # set as the 7.3" (packing differs, not the inks), so it borrows that
+    # measurement until the T133A01 is calibrated.
+    (66, ColorScheme.BWGBRY_SPLIT): SPECTRA_7_3_6COLOR_V2,
     # Add more as color calibration becomes available:
     # (?, ColorScheme.BWRY): BWRY_4_2,  # 4.2" BWRY
     # (?, ColorScheme.BWR): HANSHOW_BWR,
