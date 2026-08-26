@@ -27,11 +27,13 @@ KEY_LENGTH_BYTES: Final = 16
 KEY_LENGTH_HEX: Final = KEY_LENGTH_BYTES * 2
 
 
-def parse_encryption_key(raw: str | None) -> bytes | None:
-    """Parse a stored hex encryption key into the bytes the device API expects.
+def parse_encryption_key(raw: bytes | str | None) -> bytes | None:
+    """Normalize an encryption key into the bytes the device API expects.
 
     ``raw`` is the form a host persists or a user pastes: 32 hex characters for
-    the 16-byte AES-128 master key, or None when the device is unencrypted.
+    the 16-byte AES-128 master key, the 16 raw bytes themselves, or None when the
+    device is unencrypted. Bytes are validated and returned unchanged, so a
+    caller holding either form can pass it straight through without branching.
 
     Normalization is deliberately forgiving, because a key is something a human
     copies between a config tool, a shell and a settings field. Case is not
@@ -52,6 +54,10 @@ def parse_encryption_key(raw: str | None) -> bytes | None:
     """
     if raw is None:
         return None
+    if isinstance(raw, bytes):
+        if len(raw) != KEY_LENGTH_BYTES:
+            raise InvalidEncryptionKeyError(f"encryption key must be {KEY_LENGTH_BYTES} bytes, got {len(raw)}")
+        return raw
     candidate = raw.strip().replace(" ", "").replace(":", "")
     if len(candidate) != KEY_LENGTH_HEX:
         raise InvalidEncryptionKeyError(

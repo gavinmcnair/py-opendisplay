@@ -2,6 +2,7 @@
 
 import pytest
 
+from opendisplay import OpenDisplayDevice
 from opendisplay.crypto import (
     KEY_LENGTH_BYTES,
     aes_cmac,
@@ -338,6 +339,20 @@ class TestParseEncryptionKey:
         with pytest.raises(InvalidEncryptionKeyError):
             parse_encryption_key(raw)
 
+    def test_bytes_pass_through_validated(self) -> None:
+        """A caller already holding the key should not have to branch on its form."""
+        raw = bytes.fromhex(self.KEY_HEX)
+        assert parse_encryption_key(raw) is raw
+
+    @pytest.mark.parametrize("size", [0, 1, 15, 17, 32])
+    def test_bytes_of_the_wrong_length_are_rejected(self, size: int) -> None:
+        """AES-128 needs exactly 16 bytes; 32 is the hex length, not a key."""
+        with pytest.raises(InvalidEncryptionKeyError):
+            parse_encryption_key(b"\x00" * size)
+
+    def test_both_forms_of_the_same_key_agree(self) -> None:
+        assert parse_encryption_key(self.KEY_HEX) == parse_encryption_key(bytes.fromhex(self.KEY_HEX))
+
     def test_error_is_an_opendisplay_error_not_an_auth_error(self) -> None:
         """Nothing was sent to a device, so this is local config, not a rejection.
 
@@ -346,3 +361,35 @@ class TestParseEncryptionKey:
         """
         assert issubclass(InvalidEncryptionKeyError, OpenDisplayError)
         assert not issubclass(InvalidEncryptionKeyError, AuthenticationError)
+
+
+class TestDeviceAcceptsEitherKeyForm:
+    """The constructor normalizes, so hosts never parse a key themselves."""
+
+    KEY_HEX = "aabbccddee112233aabbccddee112233"
+
+    def test_a_hex_string_is_accepted_and_normalized(self) -> None:
+        device = OpenDisplayDevice(mac_address="AA:BB:CC:DD:EE:FF", encryption_key=self.KEY_HEX)
+        assert device._encryption_key == bytes.fromhex(self.KEY_HEX)
+
+    def test_separated_hex_is_accepted(self) -> None:
+        separated = "aa:bb:cc:dd:ee:11:22:33:aa:bb:cc:dd:ee:11:22:33"
+        device = OpenDisplayDevice(mac_address="AA:BB:CC:DD:EE:FF", encryption_key=separated)
+        assert device._encryption_key == bytes.fromhex(self.KEY_HEX)
+
+    def test_raw_bytes_still_work(self) -> None:
+        device = OpenDisplayDevice(mac_address="AA:BB:CC:DD:EE:FF", encryption_key=bytes.fromhex(self.KEY_HEX))
+        assert device._encryption_key == bytes.fromhex(self.KEY_HEX)
+
+    def test_no_key_stays_none(self) -> None:
+        assert OpenDisplayDevice(mac_address="AA:BB:CC:DD:EE:FF")._encryption_key is None
+
+    @pytest.mark.parametrize("bad", ["nothex", "aabb", b"short", b""])
+    def test_a_malformed_key_is_rejected_before_any_connection(self, bad: bytes | str) -> None:
+        """The point of the change: this used to surface as a TypeError mid-connect.
+
+        A device that is asleep most of the time would have spent a wake window
+        discovering the caller had a typo.
+        """
+        with pytest.raises(InvalidEncryptionKeyError):
+            OpenDisplayDevice(mac_address="AA:BB:CC:DD:EE:FF", encryption_key=bad)

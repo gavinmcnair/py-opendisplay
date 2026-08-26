@@ -25,6 +25,7 @@ from .crypto import (
     derive_session_key,
     encrypt_command,
     generate_client_nonce,
+    parse_encryption_key,
 )
 from .display_palettes import PANELS_4GRAY, get_bwry_codes, get_gray4_codes, get_palette_for_display
 from .encoding import (
@@ -45,6 +46,7 @@ from .exceptions import (
     BLETimeoutError,
     ImageEncodingError,
     IntegrityCheckError,
+    InvalidEncryptionKeyError,
     InvalidResponseError,
     NfcNotSupportedError,
     ProtocolError,
@@ -515,7 +517,7 @@ class OpenDisplayDevice:  # pylint: disable=too-many-instance-attributes
         max_attempts: int = 4,
         use_services_cache: bool = True,
         use_measured_palettes: bool = True,
-        encryption_key: bytes | None = None,
+        encryption_key: bytes | str | None = None,
         blocks_per_ack: int = 8,
         max_queue_size: int = 16,
     ):
@@ -543,7 +545,11 @@ class OpenDisplayDevice:  # pylint: disable=too-many-instance-attributes
             max_attempts: Maximum connection attempts for bleak-retry-connector (default: 4)
             use_services_cache: Enable GATT service caching for faster reconnections (default: True)
             use_measured_palettes: Use measured color palettes when available (default: True)
-            encryption_key: 16-byte AES-128 master key for encrypted devices (optional).
+            encryption_key: AES-128 master key for encrypted devices (optional),
+                as the 16 raw bytes or as 32 hex characters. A malformed key is
+                rejected here rather than at the first command, so a bad key
+                cannot cost a connection (or a sleeping device's wake window)
+                before it is reported.
             blocks_per_ack: Requested PIPE_WRITE ACK cadence N (blocks per ack), 1..32
                 (default: 8). Negotiated down to the device maximum.
             max_queue_size: Requested PIPE_WRITE window W (tokens in flight), 1..32
@@ -591,7 +597,10 @@ class OpenDisplayDevice:  # pylint: disable=too-many-instance-attributes
         self._fw_version: FirmwareVersion | None = None
 
         # Encryption session state (populated by authenticate())
-        self._encryption_key = encryption_key
+        # Normalize (and validate) up front: a str key used to be accepted
+        # silently and fail with an opaque TypeError inside authenticate(),
+        # after the connect had already happened.
+        self._encryption_key = parse_encryption_key(encryption_key)
         self._session_key: bytes | None = None
         self._session_id: bytes | None = None
         self._nonce_counter: int = 0
@@ -861,19 +870,27 @@ class OpenDisplayDevice:  # pylint: disable=too-many-instance-attributes
         return raw
 
     @_serialized
-    async def authenticate(self, key: bytes) -> None:
+    async def authenticate(self, key: bytes | str) -> None:
         """Perform two-step challenge-response authentication with the device.
 
         After successful authentication, all subsequent commands and responses
         are transparently encrypted/decrypted via _write() and _read().
 
         Args:
-            key: 16-byte AES-128 master key
+            key: AES-128 master key, as the 16 raw bytes or 32 hex characters
 
         Raises:
             AuthenticationFailedError: If the device rejects the key or is rate-limited
+            InvalidEncryptionKeyError: If the key is malformed. Raised before any
+                frame is sent, so a bad key is never mistaken for a device that
+                refused a good one.
             InvalidResponseError: If device sends malformed response
         """
+        parsed_key = parse_encryption_key(key)
+        if parsed_key is None:  # pragma: no cover - excluded by the signature
+            raise InvalidEncryptionKeyError("authenticate() requires an encryption key")
+        key = parsed_key
+
         _LOGGER.debug("Authenticating with device %s", self.mac_address)
 
         # Step 1: Request server nonce (retry once if device reports existing session)
