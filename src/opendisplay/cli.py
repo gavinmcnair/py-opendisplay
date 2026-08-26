@@ -23,6 +23,7 @@ from rich.table import Table
 from rich.tree import Tree
 
 from .battery import voltage_to_percent
+from .crypto import parse_encryption_key
 from .device import OpenDisplayDevice
 from .discovery import discover_devices_with_adv
 from .exceptions import (
@@ -30,6 +31,7 @@ from .exceptions import (
     AuthenticationRequiredError,
     BLEConnectionError,
     BLETimeoutError,
+    InvalidEncryptionKeyError,
     OpenDisplayError,
 )
 from .models.config import GlobalConfig, SensorData
@@ -52,7 +54,7 @@ from .models.enums import (
     TouchIcType,
     WifiEncryption,
 )
-from .models.firmware import FirmwareVersion
+from .models.firmware import FirmwareVersion, format_firmware_version
 from .partial import PartialState
 from .sensors import SensorReading
 
@@ -99,16 +101,15 @@ def _handle_ble_error(exc: OpenDisplayError) -> NoReturn:
 
 
 def _parse_hex_key(hex_str: str | None) -> bytes | None:
-    """Convert hex string to 16-byte AES key, or None if not provided."""
-    if hex_str is None:
-        return None
-    cleaned = hex_str.strip().replace(" ", "").replace(":", "")
-    if len(cleaned) != 32:
-        _error(f"--key must be exactly 32 hex characters (16 bytes), got {len(cleaned)}")
+    """Convert hex string to 16-byte AES key, or None if not provided.
+
+    Delegates the format itself to the library so the CLI cannot drift from what
+    every other host accepts; only the argparse-flavoured error text is local.
+    """
     try:
-        return bytes.fromhex(cleaned)
-    except ValueError as exc:
-        _error(f"--key contains invalid hex characters: {exc}")
+        return parse_encryption_key(hex_str)
+    except InvalidEncryptionKeyError as exc:
+        _error(f"--key is not a valid encryption key: {exc}")
 
 
 def _parse_compression_value(flag: str, value: str) -> float | str:
@@ -943,7 +944,10 @@ def _build_info_tree(ctx: _InfoContext) -> Tree:
             group.add(list_section.line(item))
 
     fw = ctx.fw
-    version = f"{fw['major']}.{fw['minor']}.{fw.get('patch', 0)}"
+    # Formatted through the library so the CLI, a host's device registry and a
+    # release tag all render the same version. Before this, the CLI always
+    # printed three parts and showed 1.6.0 where the tag is 1.6.
+    version = format_firmware_version(fw["major"], fw["minor"], fw.get("patch"))
     tree.add(f"[bold]Firmware[/bold]          {version}  [dim](sha: {fw['sha']})[/dim]")
     return tree
 
