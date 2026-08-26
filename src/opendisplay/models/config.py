@@ -343,6 +343,21 @@ class DisplayConfig:
         return bool(self.transmission_modes & 0x02)
 
     @property
+    def supports_compression(self) -> bool:
+        """Whether the panel accepts a compressed upload by either mechanism.
+
+        Post-2.0 configs may advertise only streaming decompression (bit 0x01,
+        historically ZIPXL) without the plain ZIP bit; pre-2.0 configs may
+        advertise only ZIP. Firmware 2.0 accepts a compressed upload either way,
+        and <= 1.81 NACKs one without the ZIP bit so the upload falls back to
+        uncompressed.
+
+        This is the question every upload path actually asks, so it lives here
+        rather than being spelled out at each call site.
+        """
+        return self.supports_zip or self.supports_streaming_decompression
+
+    @property
     def supports_g5(self) -> bool:
         """Check if display supports Group 5 compression (TRANSMISSION_MODE_G5)."""
         return bool(self.transmission_modes & 0x04)
@@ -403,6 +418,34 @@ class DisplayConfig:
             return Rotation(self.rotation)
         except ValueError:
             return _INDEX_TO_ROTATION.get(self.rotation, self.rotation)
+
+    def canvas_size(self, extra_rotation: Rotation | int = Rotation.ROTATE_0) -> tuple[int, int]:
+        """Return the (width, height) a source image should be authored at.
+
+        The device applies its configured ``rotation`` on top of any rotation the
+        caller asks for, then fits the result to the panel's native pixel grid.
+        When the combined rotation transposes the axes (90 or 270 degrees), a
+        canvas drawn at the panel's own width x height has the wrong aspect ratio
+        and the device-side fit scales or letterboxes it. Drawing at the
+        transposed size instead makes that fit a 1:1 no-op.
+
+        Rotation itself is left to the device; this only answers what shape to
+        draw. An unknown stored rotation is treated as 0 degrees.
+
+        Args:
+            extra_rotation: Additional rotation the caller will request, as a
+                ``Rotation`` or as degrees.
+
+        Returns:
+            (width, height) in pixels: the panel's own dimensions, or those
+            swapped when the effective rotation is 90 or 270 degrees.
+        """
+        base = self.rotation_enum
+        base_deg = base.value if isinstance(base, Rotation) else 0
+        extra_deg = extra_rotation.value if isinstance(extra_rotation, Rotation) else int(extra_rotation)
+        if (base_deg + extra_deg) % 360 in (90, 270):
+            return self.pixel_height, self.pixel_width
+        return self.pixel_width, self.pixel_height
 
     SIZE: ClassVar[int] = 46
 
@@ -633,6 +676,19 @@ class BinaryInputs:
         if self.button_data_byte_index > self.MAX_BUTTON_DATA_BYTE_INDEX:
             return None
         return self.button_data_byte_index
+
+    @property
+    def enabled_button_ids(self) -> tuple[int, ...]:
+        """Button ids this input actually has fitted, in ascending order.
+
+        ``input_flags`` is a bitmask over the 8 pin slots: bit N set means slot N
+        carries a button. The bit position *is* the button id reported in the
+        advertisement's button byte, so this is also the set of ids a consumer
+        should expect to see events for.
+
+        Returns an empty tuple when no slots are populated.
+        """
+        return tuple(bit for bit in range(self.MAX_BUTTON_ID + 1) if self.input_flags & (1 << bit))
 
     @classmethod
     def adc_ladder(

@@ -6,6 +6,7 @@ Pure Python package for communicating with OpenDisplay BLE e-paper tags.
 from epaper_dithering import ColorScheme, DitherMode
 
 from .battery import voltage_to_percent
+from .crypto import KEY_LENGTH_BYTES, KEY_LENGTH_HEX, parse_encryption_key
 from .device import OpenDisplayDevice, prepare_image
 from .discovery import discover_devices, discover_devices_with_adv
 from .discovery_ip import IpDeviceInfo, discover_ip_devices
@@ -18,6 +19,7 @@ from .exceptions import (
     ConfigParseError,
     ImageEncodingError,
     IntegrityCheckError,
+    InvalidEncryptionKeyError,
     InvalidResponseError,
     NfcNotSupportedError,
     NfcWriteError,
@@ -88,12 +90,32 @@ from .models.enums import (
     get_board_type_name,
     get_manufacturer_name,
 )
-from .models.firmware import firmware_ota_asset, firmware_release_repo
-from .models.led_flash import LedFlashConfig, LedFlashStep
+from .models.firmware import (
+    firmware_ota_asset,
+    firmware_release_repo,
+    format_firmware_version,
+    supports_ble_ota_install,
+)
+from .models.led_flash import (
+    DELAY_UNIT_MS,
+    LedFlashConfig,
+    LedFlashStep,
+    ms_to_inter_delay_units,
+    ms_to_loop_delay_units,
+    pack_led_color,
+    unpack_led_color,
+)
 from .ota import find_nrf_dfu_device, perform_nrf_dfu, perform_silabs_ota
 from .partial import PartialState
-from .protocol import MANUFACTURER_ID, SERVICE_UUID
+from .protocol import (
+    MANUFACTURER_ID,
+    NFC_MIME_TYPE_MAX,
+    NFC_WRITE_MAX_TOTAL,
+    SERVICE_UUID,
+    build_nfc_payload,
+)
 from .sensors import SensorReading, read_sensor_values
+from .sleep import DEFAULT_WAKE_WINDOW_MS, SleepModel
 from .transport import BleTransport, TcpTransport, Transport
 
 __version__ = "0.1.0"
@@ -127,6 +149,7 @@ __all__ = [
     "InvalidResponseError",
     "ImageEncodingError",
     "IntegrityCheckError",
+    "InvalidEncryptionKeyError",
     "NfcNotSupportedError",
     "NfcWriteError",
     "OTAError",
@@ -147,7 +170,14 @@ __all__ = [
     "note_to_index",
     "LedFlashConfig",
     "LedFlashStep",
+    "DELAY_UNIT_MS",
+    "pack_led_color",
+    "unpack_led_color",
+    "ms_to_loop_delay_units",
+    "ms_to_inter_delay_units",
     "firmware_ota_asset",
+    "format_firmware_version",
+    "supports_ble_ota_install",
     "firmware_release_repo",
     "SensorData",
     "SensorReading",
@@ -207,4 +237,12 @@ __all__ = [
     # Constants
     "SERVICE_UUID",
     "MANUFACTURER_ID",
+    "NFC_MIME_TYPE_MAX",
+    "NFC_WRITE_MAX_TOTAL",
+    "build_nfc_payload",
+    "SleepModel",
+    "DEFAULT_WAKE_WINDOW_MS",
+    "KEY_LENGTH_BYTES",
+    "KEY_LENGTH_HEX",
+    "parse_encryption_key",
 ]

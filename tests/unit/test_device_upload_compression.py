@@ -6,7 +6,7 @@ import pytest
 from epaper_dithering import ColorScheme
 from PIL import Image
 
-from opendisplay import OpenDisplayDevice
+from opendisplay import OpenDisplayDevice, prepare_image
 from opendisplay.models.capabilities import DeviceCapabilities
 from opendisplay.models.config import (
     DisplayConfig,
@@ -268,3 +268,39 @@ def test_prepare_image_always_uses_9bit_zlib_window(transmission_modes: int) -> 
     )
     assert compressed is not None
     assert zlib_window_bits(compressed) == FIRMWARE_ZLIB_WINDOW_BITS
+
+
+class TestPrepareImageCompressNone:
+    """compress=None means "ask the config", the same question upload_image asks."""
+
+    def _image(self) -> Image.Image:
+        return Image.new("RGB", (2, 2), color=(0, 0, 0))
+
+    @pytest.mark.parametrize(
+        ("transmission_modes", "label"),
+        [(0x02, "zip"), (0x01, "streaming decompression"), (0x03, "both bits")],
+    )
+    def test_derives_true_on_a_compression_capable_panel(self, transmission_modes: int, label: str) -> None:
+        config = _config(transmission_modes=transmission_modes)
+        derived = prepare_image(self._image(), config=config, compress=None)
+        explicit = prepare_image(self._image(), config=config, compress=True)
+        assert derived[1] is not None, f"expected compression for {label}"
+        assert derived[1] == explicit[1]
+
+    def test_derives_false_when_the_panel_advertises_neither_bit(self) -> None:
+        config = _config(transmission_modes=0x00)
+        derived = prepare_image(self._image(), config=config, compress=None)
+        assert derived[1] is None
+        assert derived[0] == prepare_image(self._image(), config=config, compress=False)[0]
+
+    def test_explicit_values_still_win_over_the_config(self) -> None:
+        """None is opt-in; a caller that states a preference keeps it."""
+        capable = _config(transmission_modes=0x02)
+        incapable = _config(transmission_modes=0x00)
+        assert prepare_image(self._image(), config=capable, compress=False)[1] is None
+        assert prepare_image(self._image(), config=incapable, compress=True)[1] is not None
+
+    def test_default_is_unchanged_for_existing_callers(self) -> None:
+        """The default stays True, so nothing that omits the argument shifts."""
+        config = _config(transmission_modes=0x00)
+        assert prepare_image(self._image(), config=config)[1] is not None

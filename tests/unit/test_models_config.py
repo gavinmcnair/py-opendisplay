@@ -7,6 +7,7 @@ from opendisplay.models.enums import (
     BoardManufacturer,
     DIYBoardType,
     PowerMode,
+    Rotation,
     SeeedBoardType,
     WaveshareBoardType,
 )
@@ -216,3 +217,100 @@ class TestSensorDataMsdStartByte:
         sensor = SensorData(instance_number=0, sensor_type=4, bus_id=1, msd_data_start_byte=3)
 
         assert sensor.sht40_msd_start_byte == 3
+
+
+class TestBinaryInputsEnabledButtonIds:
+    """input_flags is a bitmask over 8 pin slots; the bit position is the button id."""
+
+    def _inputs(self, input_flags: int) -> BinaryInputs:
+        return BinaryInputs(
+            instance_number=0,
+            input_type=1,
+            display_as=1,
+            reserved_pins=b"\x00" * 8,
+            input_flags=input_flags,
+            invert=0,
+            pullups=0,
+            pulldowns=0,
+        )
+
+    def test_no_slots_populated(self) -> None:
+        assert self._inputs(0x00).enabled_button_ids == ()
+
+    def test_single_slot(self) -> None:
+        assert self._inputs(0x01).enabled_button_ids == (0,)
+
+    def test_all_slots(self) -> None:
+        assert self._inputs(0xFF).enabled_button_ids == (0, 1, 2, 3, 4, 5, 6, 7)
+
+    def test_sparse_mask_keeps_bit_positions(self) -> None:
+        """Ids are bit positions, not a count: gaps must not renumber the buttons."""
+        assert self._inputs(0b1010_0100).enabled_button_ids == (2, 5, 7)
+
+    def test_highest_bit_is_button_seven(self) -> None:
+        """The report byte carries a 3-bit id, so 7 is the last addressable slot."""
+        assert self._inputs(0x80).enabled_button_ids == (7,)
+
+    @pytest.mark.parametrize("flags", [0x00, 0x01, 0x0F, 0x55, 0xAA, 0xFF])
+    def test_agrees_with_an_explicit_bit_scan(self, flags: int) -> None:
+        expected = tuple(bit for bit in range(8) if flags & (1 << bit))
+        assert self._inputs(flags).enabled_button_ids == expected
+
+
+class TestDisplayConfigCanvasSize:
+    """Axis order follows the combined device + caller rotation."""
+
+    def _display(self, rotation: int) -> DisplayConfig:
+        return DisplayConfig(
+            instance_number=0,
+            display_technology=1,
+            panel_ic_type=0,
+            pixel_width=296,
+            pixel_height=128,
+            active_width_mm=0,
+            active_height_mm=0,
+            tag_type=0,
+            rotation=rotation,
+            reset_pin=0xFF,
+            busy_pin=0xFF,
+            dc_pin=0xFF,
+            cs_pin=0xFF,
+            data_pin=0,
+            partial_update_support=1,
+            color_scheme=0,
+            transmission_modes=0,
+            clk_pin=0,
+            reserved_pins=b"\x00" * 7,
+            full_update_mC=0,
+            reserved=b"\x00" * 13,
+        )
+
+    def test_unrotated_panel_uses_its_own_dimensions(self) -> None:
+        assert self._display(0).canvas_size() == (296, 128)
+
+    @pytest.mark.parametrize("degrees", [90, 270])
+    def test_quarter_turns_transpose(self, degrees: int) -> None:
+        assert self._display(0).canvas_size(degrees) == (128, 296)
+
+    @pytest.mark.parametrize("degrees", [0, 180, 360])
+    def test_half_turns_do_not_transpose(self, degrees: int) -> None:
+        assert self._display(0).canvas_size(degrees) == (296, 128)
+
+    def test_device_rotation_alone_transposes(self) -> None:
+        """A panel mounted sideways needs a transposed canvas with no caller rotation."""
+        assert self._display(90).canvas_size() == (128, 296)
+
+    def test_rotations_combine_rather_than_override(self) -> None:
+        """90 on top of 90 is 180, which is back to the panel's own axis order."""
+        assert self._display(90).canvas_size(90) == (296, 128)
+        assert self._display(90).canvas_size(180) == (128, 296)
+        assert self._display(180).canvas_size(180) == (296, 128)
+
+    def test_accepts_a_rotation_enum(self) -> None:
+        assert self._display(0).canvas_size(Rotation.ROTATE_90) == (128, 296)
+        assert self._display(0).canvas_size(Rotation.ROTATE_0) == (296, 128)
+
+    def test_unknown_stored_rotation_is_treated_as_zero(self) -> None:
+        """A config carrying a rotation the library cannot decode must still render."""
+        assert self._display(200).canvas_size() == (296, 128)
+        assert self._display(200).canvas_size(90) == (128, 296)

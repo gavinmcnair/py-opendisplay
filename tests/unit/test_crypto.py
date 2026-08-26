@@ -3,6 +3,7 @@
 import pytest
 
 from opendisplay.crypto import (
+    KEY_LENGTH_BYTES,
     aes_cmac,
     aes_ecb_encrypt,
     compute_challenge_response,
@@ -12,7 +13,9 @@ from opendisplay.crypto import (
     encrypt_command,
     generate_client_nonce,
     get_nonce,
+    parse_encryption_key,
 )
+from opendisplay.exceptions import AuthenticationError, InvalidEncryptionKeyError, OpenDisplayError
 
 _RFC4493_KEY = bytes.fromhex("2b7e151628aed2a6abf7158809cf4f3c")
 
@@ -275,3 +278,71 @@ class TestGenerateClientNonce:
         n1 = generate_client_nonce()
         n2 = generate_client_nonce()
         assert n1 != n2
+
+
+class TestParseEncryptionKey:
+    """The stored-key format: 32 hex characters for a 16-byte AES-128 key."""
+
+    KEY_HEX = "aabbccddee112233aabbccddee112233"
+
+    def test_none_means_no_key(self) -> None:
+        """An unencrypted device stores nothing, which is not an error."""
+        assert parse_encryption_key(None) is None
+
+    def test_parses_a_valid_key(self) -> None:
+        assert parse_encryption_key(self.KEY_HEX) == bytes.fromhex(self.KEY_HEX)
+        assert len(parse_encryption_key(self.KEY_HEX)) == KEY_LENGTH_BYTES
+
+    def test_case_is_not_significant(self) -> None:
+        """A key pasted from a config tool round-trips whichever way it is cased."""
+        assert parse_encryption_key(self.KEY_HEX.upper()) == parse_encryption_key(self.KEY_HEX)
+
+    def test_surrounding_whitespace_is_ignored(self) -> None:
+        assert parse_encryption_key(f"  {self.KEY_HEX}\n") == parse_encryption_key(self.KEY_HEX)
+
+    @pytest.mark.parametrize(
+        "separated",
+        [
+            "aa:bb:cc:dd:ee:11:22:33:aa:bb:cc:dd:ee:11:22:33",
+            "aa bb cc dd ee 11 22 33 aa bb cc dd ee 11 22 33",
+            "AA:BB:CC:DD:EE:11:22:33:AA:BB:CC:DD:EE:11:22:33",
+        ],
+    )
+    def test_separators_are_not_content(self, separated: str) -> None:
+        """A key is copied between tools by humans; colons and spaces are noise."""
+        assert parse_encryption_key(separated) == parse_encryption_key(self.KEY_HEX)
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            "",  # absence is expressed by None, so empty is malformed
+            "aabb",  # too short
+            "aabbccddee112233aabbccddee1122",  # 30 chars
+            "aabbccddee112233aabbccddee1122334",  # 33 chars
+            "aabbccddee112233aabbccddee11223344",  # 34 chars
+        ],
+    )
+    def test_wrong_length_is_rejected(self, raw: str) -> None:
+        with pytest.raises(InvalidEncryptionKeyError):
+            parse_encryption_key(raw)
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            "zzbbccddee112233aabbccddee112233",  # not hex at all
+            "aabbccddee112233aabbccddee1122g3",  # one bad nibble
+            "aabbccddee112233aabbccddee11223!",  # punctuation
+        ],
+    )
+    def test_non_hex_is_rejected(self, raw: str) -> None:
+        with pytest.raises(InvalidEncryptionKeyError):
+            parse_encryption_key(raw)
+
+    def test_error_is_an_opendisplay_error_not_an_auth_error(self) -> None:
+        """Nothing was sent to a device, so this is local config, not a rejection.
+
+        A host should react by asking for the key again, not by treating the
+        device as having refused it.
+        """
+        assert issubclass(InvalidEncryptionKeyError, OpenDisplayError)
+        assert not issubclass(InvalidEncryptionKeyError, AuthenticationError)

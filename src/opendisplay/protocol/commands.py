@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from enum import IntEnum
 
 from ..models.buzzer_activate import BuzzerActivateConfig
+from ..models.enums import NfcRecordType
 from ..models.led_flash import LedFlashConfig
 
 
@@ -489,6 +490,64 @@ def build_pipe_write_end_command(refresh_mode: int, new_etag: int | None = None)
     if not 0 <= new_etag <= 0xFFFFFFFF:
         raise ValueError(f"new_etag out of uint32 range: {new_etag}")
     return cmd + refresh_mode.to_bytes(1, byteorder="big") + new_etag.to_bytes(4, byteorder="big")
+
+
+#: MIME record header: a single length byte, so the type is capped at 255 bytes.
+NFC_MIME_TYPE_MAX = 255
+
+
+def build_nfc_payload(
+    record_type: NfcRecordType | int,
+    content: bytes | str,
+    mime_type: str | None = None,
+) -> bytes:
+    """Build and validate the NDEF payload for an NFC write, without any I/O.
+
+    This is the same payload ``OpenDisplayDevice.write_nfc_*`` sends, exposed
+    separately so a caller can validate before opening a connection. Rejecting an
+    oversized record costs nothing here; discovering it after waking a sleeping
+    device and negotiating a link costs a wake window.
+
+    Sizes are measured in encoded bytes, not characters: a multi-byte UTF-8
+    string is longer than it looks, and for MIME records the length-prefixed type
+    header counts against the same budget as the body.
+
+    Args:
+        record_type: NDEF record type. MIME requires ``mime_type``; the others
+            reject it, since silently ignoring it would hide a caller's mistake.
+        content: Record content. A ``str`` is encoded as UTF-8; ``bytes`` is used
+            as-is.
+        mime_type: MIME type for a MIME record, for example "text/vcard". Must
+            encode to 1..255 bytes as UTF-8.
+
+    Returns:
+        Payload bytes ready for ``write_nfc``.
+
+    Raises:
+        ValueError: If ``mime_type`` is present on a non-MIME record or absent on
+            a MIME one, if the encoded MIME type is outside 1..255 bytes, or if
+            the total payload is empty or exceeds ``NFC_WRITE_MAX_TOTAL``.
+    """
+    is_mime = int(record_type) == int(NfcRecordType.MIME)
+    if mime_type is not None and not is_mime:
+        raise ValueError("mime_type is only valid for a MIME record")
+    if is_mime and mime_type is None:
+        raise ValueError("a MIME record requires a mime_type")
+
+    body = content.encode("utf-8") if isinstance(content, str) else content
+
+    if is_mime:
+        assert mime_type is not None  # narrowed by the checks above
+        mt = mime_type.encode("utf-8")
+        if not 1 <= len(mt) <= NFC_MIME_TYPE_MAX:
+            raise ValueError(f"mime_type must encode to 1..{NFC_MIME_TYPE_MAX} bytes, got {len(mt)}")
+        payload = bytes([len(mt)]) + mt + body
+    else:
+        payload = body
+
+    if not 1 <= len(payload) <= NFC_WRITE_MAX_TOTAL:
+        raise ValueError(f"payload length must be 1..{NFC_WRITE_MAX_TOTAL}, got {len(payload)}")
+    return payload
 
 
 def build_nfc_write_inline_command(rec_type: int, payload: bytes) -> bytes:

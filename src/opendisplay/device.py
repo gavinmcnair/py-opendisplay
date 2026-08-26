@@ -100,6 +100,7 @@ from .protocol import (
     build_direct_write_start_uncompressed,
     build_enter_dfu_command,
     build_led_activate_command,
+    build_nfc_payload,
     build_nfc_write_data_command,
     build_nfc_write_end_command,
     build_nfc_write_inline_command,
@@ -280,7 +281,7 @@ def prepare_image(
     use_measured_palettes: bool = True,
     panel_ic_type: int | None = None,
     dither_mode: DitherMode = DitherMode.BURKES,
-    compress: bool = True,
+    compress: bool | None = True,
     serpentine: bool = True,
     exposure: float = 1.0,
     saturation: float = 1.0,
@@ -306,7 +307,10 @@ def prepare_image(
         panel_ic_type: Panel IC type for palette lookup. If None, extracted
             from config.
         dither_mode: Dithering algorithm to use (default: BURKES)
-        compress: Whether to compress the image data (default: True)
+        compress: Whether to compress the image data (default: True). Pass None
+            to derive it from ``config``, matching what upload_image() does:
+            compress only when the panel advertises ZIP or streaming
+            decompression.
         serpentine: Alternate scan direction each row to reduce artifacts (default: True)
         exposure: Exposure multiplier, >1.0 brightens (default: 1.0)
         saturation: Saturation multiplier, >1.0 boosts (default: 1.0)
@@ -385,7 +389,14 @@ def prepare_image(
     else:
         image_data = encode_image(dithered, color_scheme)
 
-    # Optionally compress
+    # Optionally compress. compress=None means "ask the config", which is what
+    # upload_image() does internally; a caller preparing an image up front (to
+    # move the CPU work off an event loop, say) would otherwise have to
+    # reimplement this check and keep it in sync by hand.
+    if compress is None:
+        display_cfg = config.displays[0] if config is not None and config.displays else None
+        compress = display_cfg.supports_compression if display_cfg else True
+
     compressed_data = None
     if compress:
         # Current firmware compiles uzlib with a 9-bit window and hard-rejects any
@@ -1548,7 +1559,7 @@ class OpenDisplayDevice:  # pylint: disable=too-many-instance-attributes
             url: URL to write.
             timeout: Optional override; see write_nfc.
         """
-        await self.write_nfc(NfcRecordType.URI, url.encode("utf-8"), timeout)
+        await self.write_nfc(NfcRecordType.URI, build_nfc_payload(NfcRecordType.URI, url), timeout)
 
     async def write_nfc_text(self, text: str, timeout: float | None = None) -> None:
         """Write a TEXT NDEF record containing the given text.
@@ -1559,7 +1570,7 @@ class OpenDisplayDevice:  # pylint: disable=too-many-instance-attributes
             text: Text to write.
             timeout: Optional override; see write_nfc.
         """
-        await self.write_nfc(NfcRecordType.TEXT, text.encode("utf-8"), timeout)
+        await self.write_nfc(NfcRecordType.TEXT, build_nfc_payload(NfcRecordType.TEXT, text), timeout)
 
     async def write_nfc_mime(
         self,
@@ -1580,13 +1591,10 @@ class OpenDisplayDevice:  # pylint: disable=too-many-instance-attributes
             timeout: Optional override; see write_nfc.
 
         Raises:
-            ValueError: If the encoded MIME type is outside 1..255 bytes.
+            ValueError: If the encoded MIME type is outside 1..255 bytes, or the
+                assembled payload exceeds NFC_WRITE_MAX_TOTAL.
         """
-        mt = mime_type.encode("utf-8")
-        if not 1 <= len(mt) <= 255:
-            raise ValueError(f"mime_type must encode to 1..255 bytes, got {len(mt)}")
-        body_bytes = body.encode("utf-8") if isinstance(body, str) else body
-        payload = bytes([len(mt)]) + mt + body_bytes
+        payload = build_nfc_payload(NfcRecordType.MIME, body, mime_type)
         await self.write_nfc(NfcRecordType.MIME, payload, timeout)
 
     @_serialized
@@ -1799,9 +1807,7 @@ class OpenDisplayDevice:  # pylint: disable=too-many-instance-attributes
         # compressed uploads either way (<=1.81 NACKs without the ZIP bit and
         # the upload falls back to uncompressed).
         display_cfg = self._config.displays[0] if (self._config and self._config.displays) else None
-        supports_compression = (
-            (display_cfg.supports_zip or display_cfg.supports_streaming_decompression) if display_cfg else True
-        )
+        supports_compression = display_cfg.supports_compression if display_cfg else True
 
         # When a partial upload may succeed, defer full-frame compression: it is
         # pure waste if the partial path handles the update. _dispatch_upload
@@ -1919,9 +1925,7 @@ class OpenDisplayDevice:  # pylint: disable=too-many-instance-attributes
         sent), False if the firmware auto-completed the upload.
         """
         display_cfg = self._config.displays[0] if (self._config and self._config.displays) else None
-        supports_compression = (
-            (display_cfg.supports_zip or display_cfg.supports_streaming_decompression) if display_cfg else True
-        )
+        supports_compression = display_cfg.supports_compression if display_cfg else True
         streaming_decompression = bool(display_cfg and display_cfg.supports_streaming_decompression)
         if (
             compress

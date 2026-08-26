@@ -7,16 +7,60 @@ All operations match the firmware's mbedtls/CryptoCell implementations exactly.
 from __future__ import annotations
 
 import os
+from typing import Final
 
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives.ciphers.aead import AESCCM
 from cryptography.hazmat.primitives.cmac import CMAC
+
+from .exceptions import InvalidEncryptionKeyError
 
 # Firmware placeholder device ID (hardcoded in firmware, never changes)
 _DEVICE_ID = bytes([0x00, 0x00, 0x00, 0x01])
 
 # CCM auth tag length used by firmware
 _TAG_LEN = 12
+
+#: Length of the AES-128 master key, in bytes.
+KEY_LENGTH_BYTES: Final = 16
+#: Length of the same key written as hex, which is how hosts store it.
+KEY_LENGTH_HEX: Final = KEY_LENGTH_BYTES * 2
+
+
+def parse_encryption_key(raw: str | None) -> bytes | None:
+    """Parse a stored hex encryption key into the bytes the device API expects.
+
+    ``raw`` is the form a host persists or a user pastes: 32 hex characters for
+    the 16-byte AES-128 master key, or None when the device is unencrypted.
+
+    Normalization is deliberately forgiving, because a key is something a human
+    copies between a config tool, a shell and a settings field. Case is not
+    significant, and spaces and colons are separators rather than content, so
+    ``AA:BB:CC...``, ``aa bb cc...`` and ``aabbcc...`` are the same key.
+
+    This is the single definition of the stored-key format. Hosts that
+    reimplement it drift from the library and from each other, and each such copy
+    is a place where a malformed key produces a different, less useful error.
+
+    Returns:
+        The 16 key bytes, or None if ``raw`` is None.
+
+    Raises:
+        InvalidEncryptionKeyError: If the key is the wrong length or not hex.
+            An empty string raises rather than being read as "no key" - absence
+            is expressed by None, so an empty value is a malformed key.
+    """
+    if raw is None:
+        return None
+    candidate = raw.strip().replace(" ", "").replace(":", "")
+    if len(candidate) != KEY_LENGTH_HEX:
+        raise InvalidEncryptionKeyError(
+            f"encryption key must be {KEY_LENGTH_HEX} hex characters ({KEY_LENGTH_BYTES} bytes), got {len(candidate)}"
+        )
+    try:
+        return bytes.fromhex(candidate)
+    except ValueError as err:
+        raise InvalidEncryptionKeyError("encryption key is not valid hexadecimal") from err
 
 
 def aes_cmac(key: bytes, data: bytes) -> bytes:

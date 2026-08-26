@@ -8,6 +8,7 @@ from opendisplay import OpenDisplayDevice
 from opendisplay.crypto import encrypt_command
 from opendisplay.exceptions import BLETimeoutError, InvalidResponseError, NfcNotSupportedError, NfcWriteError
 from opendisplay.models.enums import NfcRecordType
+from opendisplay.protocol.commands import NFC_MIME_TYPE_MAX, NFC_WRITE_MAX_TOTAL, build_nfc_payload
 
 
 class _FakeConnection:
@@ -285,3 +286,89 @@ async def test_write_nfc_requires_connection() -> None:
 
     with pytest.raises(RuntimeError, match="not connected"):
         await device.write_nfc(NfcRecordType.TEXT, b"hello")
+
+
+class TestBuildNfcPayload:
+    """Pure payload assembly, so a caller can validate before spending a connection."""
+
+    def test_text_and_uri_pass_content_through_as_utf8(self) -> None:
+        assert build_nfc_payload(NfcRecordType.TEXT, "hello") == b"hello"
+        assert build_nfc_payload(NfcRecordType.URI, "https://example.test") == b"https://example.test"
+
+    def test_bytes_content_is_used_as_is(self) -> None:
+        assert build_nfc_payload(NfcRecordType.TEXT, b"\x01\x02\x03") == b"\x01\x02\x03"
+
+    def test_mime_prefixes_a_length_byte_and_the_type(self) -> None:
+        payload = build_nfc_payload(NfcRecordType.MIME, "BEGIN:VCARD", "text/vcard")
+        assert payload == bytes([len(b"text/vcard")]) + b"text/vcard" + b"BEGIN:VCARD"
+
+    def test_size_is_measured_in_bytes_not_characters(self) -> None:
+        """A multi-byte string is longer than it looks; the limit is on bytes."""
+        content = "é" * 256  # 2 bytes each in UTF-8 = 512
+        assert len(build_nfc_payload(NfcRecordType.TEXT, content)) == NFC_WRITE_MAX_TOTAL
+        with pytest.raises(ValueError):
+            build_nfc_payload(NfcRecordType.TEXT, content + "x")
+
+    @pytest.mark.parametrize("size", [1, 120, 121, NFC_WRITE_MAX_TOTAL - 1, NFC_WRITE_MAX_TOTAL])
+    def test_accepts_sizes_up_to_the_firmware_limit(self, size: int) -> None:
+        assert len(build_nfc_payload(NfcRecordType.TEXT, "x" * size)) == size
+
+    @pytest.mark.parametrize("size", [0, NFC_WRITE_MAX_TOTAL + 1, NFC_WRITE_MAX_TOTAL + 100])
+    def test_rejects_empty_and_oversized_payloads(self, size: int) -> None:
+        with pytest.raises(ValueError):
+            build_nfc_payload(NfcRecordType.TEXT, "x" * size)
+
+    def test_mime_header_counts_against_the_same_budget(self) -> None:
+        """The type header is part of the payload, not free space alongside it."""
+        mime = "text/vcard"  # 10 bytes, plus 1 length byte
+        body_budget = NFC_WRITE_MAX_TOTAL - len(mime) - 1
+        assert len(build_nfc_payload(NfcRecordType.MIME, "x" * body_budget, mime)) == NFC_WRITE_MAX_TOTAL
+        with pytest.raises(ValueError):
+            build_nfc_payload(NfcRecordType.MIME, "x" * (body_budget + 1), mime)
+
+    @pytest.mark.parametrize("length", [1, NFC_MIME_TYPE_MAX])
+    def test_accepts_mime_types_at_the_header_bounds(self, length: int) -> None:
+        mime = "x" * length
+        assert build_nfc_payload(NfcRecordType.MIME, b"b", mime)[0] == length
+
+    @pytest.mark.parametrize("length", [0, NFC_MIME_TYPE_MAX + 1])
+    def test_rejects_mime_types_outside_the_header_bounds(self, length: int) -> None:
+        """The header length is a single byte, so 0 and 256 are unrepresentable."""
+        with pytest.raises(ValueError):
+            build_nfc_payload(NfcRecordType.MIME, b"b", "x" * length)
+
+    def test_mime_type_on_a_non_mime_record_is_an_error(self) -> None:
+        """Ignoring it would silently drop something the caller asked for."""
+        with pytest.raises(ValueError):
+            build_nfc_payload(NfcRecordType.TEXT, "hello", "text/vcard")
+
+    def test_mime_record_without_a_mime_type_is_an_error(self) -> None:
+        with pytest.raises(ValueError):
+            build_nfc_payload(NfcRecordType.MIME, "hello")
+
+    def test_accepts_a_raw_int_record_type(self) -> None:
+        assert build_nfc_payload(int(NfcRecordType.TEXT), "hello") == b"hello"
+
+
+@pytest.mark.asyncio
+async def test_write_nfc_mime_emits_exactly_the_builder_payload() -> None:
+    """Anti-drift: the device path and the pre-flight validator must agree.
+
+    If write_nfc_mime assembled its own payload, a host could validate a record
+    the device then rejects, or vice versa. Pinning the bytes keeps the two from
+    diverging silently.
+    """
+    device = OpenDisplayDevice(mac_address="AA:BB:CC:DD:EE:FF")
+    fake = _FakeConnection(response=b"\x00\x83\x81")
+    device._connection = fake
+
+    await device.write_nfc_mime("text/vcard", "BEGIN:VCARD")
+
+    expected_payload = build_nfc_payload(NfcRecordType.MIME, "BEGIN:VCARD", "text/vcard")
+    expected_cmd = (
+        b"\x00\x83"
+        + bytes([0x01, int(NfcRecordType.MIME)])
+        + len(expected_payload).to_bytes(2, "big")
+        + expected_payload
+    )
+    assert fake.written == [expected_cmd]

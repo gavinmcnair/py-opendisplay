@@ -159,6 +159,19 @@ class NfcNotSupportedError(ProtocolError):
         super().__init__(message)
 
 
+class InvalidEncryptionKeyError(OpenDisplayError):
+    """A stored encryption key is not a valid AES-128 key.
+
+    Raised by ``parse_encryption_key`` for a key that is the wrong length or is
+    not hexadecimal. Deliberately *not* an ``AuthenticationError``: nothing has
+    been sent to a device, so this is a local configuration fault rather than a
+    rejection by the device, and a host should treat it as "ask the user for the
+    key again" rather than "the device said no".
+    """
+
+    pass
+
+
 class ImageEncodingError(OpenDisplayError):
     """Failed to encode image."""
 

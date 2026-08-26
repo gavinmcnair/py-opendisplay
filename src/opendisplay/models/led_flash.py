@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Final
 
 
 def _check_u8(name: str, value: int) -> None:
@@ -13,6 +14,72 @@ def _check_u8(name: str, value: int) -> None:
 def _check_nibble(name: str, value: int) -> None:
     if not 0 <= value <= 0x0F:
         raise ValueError(f"{name} out of range: {value} (must be 0-15)")
+
+
+#: Milliseconds represented by one step of the firmware's delay units.
+DELAY_UNIT_MS: Final = 100
+
+
+def pack_led_color(r: int, g: int, b: int) -> int:
+    """Pack 8-bit RGB into the firmware's single-byte LED colour (3R/3G/2B).
+
+    The LED payload carries one byte per step: three bits of red, three of green,
+    two of blue. Each channel is rescaled proportionally and rounded, so 255 maps
+    to the channel maximum (7, 7, 3) and 0 maps to 0.
+
+    Blue has one bit less than the others, which is a property of the wire format
+    rather than of any particular LED, so blues quantise more coarsely than reds
+    and greens. Callers wanting an exact colour should choose values that land on
+    the quantisation steps.
+
+    Args:
+        r: Red, 0-255.
+        g: Green, 0-255.
+        b: Blue, 0-255.
+
+    Raises:
+        ValueError: If any channel is outside 0-255.
+    """
+    for name, value in (("r", r), ("g", g), ("b", b)):
+        _check_u8(name, value)
+    return ((round(r * 7 / 255)) << 5) | ((round(g * 7 / 255)) << 2) | (round(b * 3 / 255))
+
+
+def unpack_led_color(packed: int) -> tuple[int, int, int]:
+    """Expand a packed 3R/3G/2B colour byte back to approximate 8-bit RGB.
+
+    The inverse of :func:`pack_led_color` up to quantisation: packing is lossy,
+    so this returns the representative full-range colour for each quantised
+    level, not the original input.
+
+    Raises:
+        ValueError: If ``packed`` is outside 0-255.
+    """
+    _check_u8("packed", packed)
+    r = (packed >> 5) & 0x07
+    g = (packed >> 2) & 0x07
+    b = packed & 0x03
+    return round(r * 255 / 7), round(g * 255 / 7), round(b * 255 / 3)
+
+
+def ms_to_loop_delay_units(ms: int) -> int:
+    """Convert a delay in milliseconds to the 4-bit loop-delay field.
+
+    One unit is ``DELAY_UNIT_MS``. The field is a nibble, so the representable
+    range is 0 to 1500 ms and values outside it clamp rather than raise: the
+    delay is a presentation detail of a flash pattern, and refusing to blink at
+    all because a caller asked for 2 seconds would be the worse failure.
+    """
+    return max(0, min(0x0F, round(ms / DELAY_UNIT_MS)))
+
+
+def ms_to_inter_delay_units(ms: int) -> int:
+    """Convert a delay in milliseconds to the 8-bit inter-delay field.
+
+    One unit is ``DELAY_UNIT_MS``, giving a representable range of 0 to 25500 ms.
+    Clamps rather than raises, for the same reason as :func:`ms_to_loop_delay_units`.
+    """
+    return max(0, min(0xFF, round(ms / DELAY_UNIT_MS)))
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,6 +96,38 @@ class LedFlashStep:
         _check_nibble("flash_count", self.flash_count)
         _check_nibble("loop_delay_units", self.loop_delay_units)
         _check_u8("inter_delay_units", self.inter_delay_units)
+
+    @classmethod
+    def from_rgb(
+        cls,
+        rgb: tuple[int, int, int],
+        *,
+        flash_count: int = 1,
+        loop_delay_ms: int = 0,
+        inter_delay_ms: int = 0,
+    ) -> LedFlashStep:
+        """Build a step from 8-bit RGB and millisecond delays.
+
+        The human-facing constructor: it takes the units a caller actually has
+        and converts to the firmware's packed colour byte and 100 ms delay units,
+        so a caller never has to know the wire encoding to blink an LED. Use the
+        plain constructor when you already hold encoded values, such as when
+        round-tripping a payload read back from a device.
+
+        Delays clamp to their representable range rather than raising; see
+        :func:`ms_to_loop_delay_units`.
+        """
+        return cls(
+            color=pack_led_color(*rgb),
+            flash_count=flash_count,
+            loop_delay_units=ms_to_loop_delay_units(loop_delay_ms),
+            inter_delay_units=ms_to_inter_delay_units(inter_delay_ms),
+        )
+
+    @property
+    def rgb(self) -> tuple[int, int, int]:
+        """The step's colour as approximate 8-bit RGB (lossy; see unpack_led_color)."""
+        return unpack_led_color(self.color)
 
 
 @dataclass(frozen=True, slots=True)

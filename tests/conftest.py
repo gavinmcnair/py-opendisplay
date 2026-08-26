@@ -8,6 +8,9 @@ from pathlib import Path
 import pytest
 from PIL import Image
 
+from opendisplay.models.config import GlobalConfig, ManufacturerData, PowerOption, SystemConfig
+from opendisplay.models.enums import PowerMode
+
 # Path to captured real protocol data
 FIXTURES_DIR = Path(__file__).parent / "fixtures/real_protocol_data"
 
@@ -80,6 +83,63 @@ def fake_transport():
 
     def _make(responses: list | None = None, **kwargs: object) -> FakeTransport:
         return FakeTransport(responses, **kwargs)
+
+    return _make
+
+
+@pytest.fixture
+def power_option():
+    """Factory fixture returning a :class:`PowerOption` with test defaults.
+
+    Defaults describe a battery device configured to deep sleep on a 5 minute
+    timer with the firmware's default wake window, which is the interesting case
+    for sleep behaviour; pass keyword overrides for anything else. Every field is
+    filled so callers only state what their test is actually about.
+    """
+
+    def _make(**overrides: object) -> PowerOption:
+        params: dict[str, object] = {
+            "power_mode": int(PowerMode.BATTERY),
+            "battery_capacity_mah": b"\x00\x00\x00",
+            "sleep_timeout_ms": 0,
+            "tx_power": 0,
+            "sleep_flags": 0,
+            "battery_sense_pin": 0xFF,
+            "battery_sense_enable_pin": 0xFF,
+            "battery_sense_flags": 0,
+            "capacity_estimator": 0,
+            "voltage_scaling_factor": 0,
+            "deep_sleep_current_ua": 0,
+            "deep_sleep_time_seconds": 300,
+            "charge_enable_pin": 0xFF,
+            "charge_state_pin": 0xFF,
+            "charger_flags": 0,
+            "min_wake_time_seconds": 0,
+            "screen_timeout_seconds": 0,
+            "reserved": b"\x00" * 10,
+        }
+        params.update(overrides)
+        return PowerOption(**params)  # type: ignore[arg-type]
+
+    return _make
+
+
+@pytest.fixture
+def global_config(power_option):
+    """Factory fixture returning a minimal :class:`GlobalConfig`.
+
+    Carries only the three required sections; pass ``power=`` to supply a
+    specific :class:`PowerOption`, or any other field as a keyword override.
+    """
+
+    def _make(power: PowerOption | None = None, **overrides: object) -> GlobalConfig:
+        params: dict[str, object] = {
+            "system": SystemConfig(ic_type=2, communication_modes=0x05, device_flags=0, pwr_pin=0xFF, reserved=b""),
+            "manufacturer": ManufacturerData(manufacturer_id=1, board_type=1, board_revision=1, reserved=b""),
+            "power": power if power is not None else power_option(),
+        }
+        params.update(overrides)
+        return GlobalConfig(**params)  # type: ignore[arg-type]
 
     return _make
 
