@@ -16,7 +16,7 @@ from PIL import Image
 
 from opendisplay import OpenDisplayDevice
 from opendisplay.device import _PipePartialEtagMismatch, _PipePartialRejected
-from opendisplay.exceptions import BLETimeoutError, InvalidResponseError
+from opendisplay.exceptions import BLETimeoutError, InvalidResponseError, SlotInvalidError, SlotTooLargeError
 from opendisplay.models.capabilities import DeviceCapabilities
 from opendisplay.models.config import (
     DisplayConfig,
@@ -31,11 +31,13 @@ from opendisplay.protocol import (
     DEFAULT_MAX_FRAME,
     PIPE_FLAG_COMPRESSED,
     PIPE_FLAG_PARTIAL,
+    PIPE_FLAG_SLOT_TARGET,
     PIPE_FRAME_OVERHEAD,
     PIPE_VERSION,
     CommandCode,
     PipeParams,
     PipePartialRequest,
+    PipeSlotRequest,
     build_pipe_write_data_command,
     build_pipe_write_end_command,
     build_pipe_write_start_command,
@@ -54,6 +56,8 @@ from opendisplay.protocol.responses import (
     PIPE_START_NACK_ETAG_MISMATCH,
     PIPE_START_NACK_PARTIAL_UNSUPPORTED,
     PIPE_START_NACK_RECT_INVALID,
+    PIPE_START_NACK_SLOT_INVALID,
+    PIPE_START_NACK_SLOT_TOO_LARGE,
 )
 
 # ─── Wire-frame helpers (shared with the sender tests via import) ─────────────
@@ -313,6 +317,79 @@ def test_build_pipe_write_start_partial_range_validation(kwargs: dict) -> None:
     partial = PipePartialRequest(**fields)  # type: ignore[arg-type]
     with pytest.raises(ValueError):
         build_pipe_write_start_command(False, 8, 4, 244, 128, partial=partial)
+
+
+# ─── Slot-target START extension (0x0080 flags bit2) ─────────────────────────
+# LOCAL FORK DIVERGENCE (PSRAM slot storage), not upstream opendisplay-protocol.
+
+
+def test_build_pipe_write_start_slot_byte_layout() -> None:
+    slot = PipeSlotRequest(slot_id=5, decompressed_size=0x0001_2345)
+    cmd = build_pipe_write_start_command(True, 16, 8, 244, 0x2000, slot=slot)
+    # 2 (opcode) + 10 (header) + 6 (extension) = 18 bytes.
+    assert len(cmd) == 18
+    assert cmd[:2] == b"\x00\x80"
+    assert cmd[2] == PIPE_VERSION
+    assert cmd[3] == PIPE_FLAG_COMPRESSED | PIPE_FLAG_SLOT_TARGET
+    assert cmd[4] == 16  # req_window
+    assert cmd[5] == 8  # req_ack_every
+    assert cmd[6:8] == struct.pack("<H", 244)
+    assert cmd[8:12] == struct.pack("<I", 0x2000)  # total_size (compressed byte total)
+    # Little-endian extension: slot_id, reserved(0), decompressed_size.
+    assert cmd[12:] == struct.pack("<BBI", 5, 0, 0x0001_2345)
+
+
+def test_build_pipe_write_start_slot_decompressed_size_defaults_zero() -> None:
+    slot = PipeSlotRequest(slot_id=0)
+    cmd = build_pipe_write_start_command(True, 16, 8, 244, 0x100, slot=slot)
+    assert cmd[12:] == struct.pack("<BBI", 0, 0, 0)
+
+
+def test_build_pipe_write_start_slot_and_partial_mutually_exclusive() -> None:
+    partial = PipePartialRequest(old_etag=1, x=0, y=0, w=8, h=8)
+    slot = PipeSlotRequest(slot_id=0)
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        build_pipe_write_start_command(True, 16, 8, 244, 0x100, partial=partial, slot=slot)
+
+
+def test_build_pipe_write_start_slot_none_is_byte_identical() -> None:
+    plain = build_pipe_write_start_command(True, 16, 8, 244, 0x11223344)
+    explicit_none = build_pipe_write_start_command(True, 16, 8, 244, 0x11223344, slot=None)
+    assert plain == explicit_none
+    assert len(plain) == 12  # unchanged 12-byte packet
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"slot_id": -1},
+        {"slot_id": 100},  # out of the 0..99 wire range
+        {"decompressed_size": -1},
+        {"decompressed_size": 0x1_0000_0000},  # > uint32
+    ],
+)
+def test_build_pipe_write_start_slot_range_validation(kwargs: dict) -> None:
+    fields = {"slot_id": 0, "decompressed_size": 0}
+    fields.update(kwargs)
+    slot = PipeSlotRequest(**fields)  # type: ignore[arg-type]
+    with pytest.raises(ValueError):
+        build_pipe_write_start_command(True, 8, 4, 244, 128, slot=slot)
+
+
+@pytest.mark.parametrize("err", [0x04, 0x08])
+def test_parse_start_nack_slot_codes(err: int) -> None:
+    ok, payload = parse_pipe_start_response(start_nack(err))
+    assert ok is False
+    assert payload == err
+
+
+def test_slot_nack_constants() -> None:
+    assert PIPE_START_NACK_SLOT_INVALID == 0x04
+    assert PIPE_START_NACK_SLOT_TOO_LARGE == 0x08
+
+
+def test_pipe_flag_slot_target_value() -> None:
+    assert PIPE_FLAG_SLOT_TARGET == 0x04
 
 
 def test_build_pipe_write_data() -> None:
@@ -626,6 +703,94 @@ async def test_negotiate_partial_silence_returns_none() -> None:
     assert params is None
     assert dev._pipe_probed is True
     assert dev._pipe_supported is False
+
+
+# ─── Slot-target negotiation (_negotiate_pipe_slot) ───────────────────────────
+# LOCAL FORK DIVERGENCE (PSRAM slot storage), not upstream opendisplay-protocol.
+
+
+@pytest.mark.asyncio
+async def test_negotiate_slot_ack_returns_params() -> None:
+    dev, conn = make_device([start_ack(flags=0x01)], blocks_per_ack=8, max_queue_size=16)
+    params = await dev._negotiate_pipe_slot(compressed=True, total_size=16, slot_id=3)
+    assert params == PipeParams(window=16, ack_every=8, max_frame=244, selective=True, compressed=True)
+    start = conn.written[0]
+    assert start[:2] == b"\x00\x80"
+    assert start[3] & PIPE_FLAG_SLOT_TARGET
+    assert len(start) == 18  # 12-byte header + 6-byte PipeSlotExt
+
+
+@pytest.mark.asyncio
+async def test_negotiate_slot_nack_invalid_raises() -> None:
+    # slot_id=50 is a valid WIRE value (0..99) but this board's real slot
+    # count is smaller (PSRAM size varies by board) -> 0x04.
+    dev, _ = make_device([start_nack(0x04)], max_queue_size=16)
+    with pytest.raises(SlotInvalidError):
+        await dev._negotiate_pipe_slot(compressed=True, total_size=16, slot_id=50)
+
+
+@pytest.mark.asyncio
+async def test_negotiate_slot_nack_too_large_raises() -> None:
+    dev, _ = make_device([start_nack(0x08)], max_queue_size=16)
+    with pytest.raises(SlotTooLargeError):
+        await dev._negotiate_pipe_slot(compressed=True, total_size=40000, slot_id=0)
+
+
+@pytest.mark.asyncio
+async def test_negotiate_slot_compressed_02_retries_uncompressed() -> None:
+    dev, conn = make_device([start_nack(0x02), start_ack(flags=0x01)], max_queue_size=16)
+    params = await dev._negotiate_pipe_slot(compressed=True, total_size=16, slot_id=0)
+    assert params is not None
+    assert params.compressed is False
+    starts = [w for w in conn.written if w[:2] == b"\x00\x80"]
+    assert len(starts) == 2
+
+
+@pytest.mark.asyncio
+async def test_negotiate_slot_silence_returns_none() -> None:
+    dev, _ = make_device([BLETimeoutError], max_queue_size=16)
+    params = await dev._negotiate_pipe_slot(compressed=True, total_size=16, slot_id=0)
+    assert params is None
+
+
+# ─── write_slot / _run_pipe_slot_upload (refresh-wait skip) ──────────────────
+# LOCAL FORK DIVERGENCE (PSRAM slot storage), not upstream opendisplay-protocol.
+
+
+@pytest.mark.asyncio
+async def test_write_slot_completes_without_waiting_for_refresh() -> None:
+    """The behavior most likely to silently regress: copy-pasting
+    _run_pipe_upload for a new slot-write path without stripping its
+    refresh-wait tail would hang here. ScriptedConn raises once its scripted
+    responses run out, and deliberately only START ACK / DATA ACK / END ACK
+    are scripted -- no refresh response, because firmware never sends one for
+    a slot-target transfer.
+    """
+    dev, conn = make_device(
+        [start_ack(flags=0x01), data_ack({0}), END_ACK],
+        max_queue_size=16,
+    )
+    await dev.write_slot(7, b"raw panel bytes")
+    # Exactly 3 reads: START ACK, DATA ACK, END ACK -- no fourth read waiting
+    # on a refresh response that firmware will never send.
+    assert len(conn.timeouts) == 3
+    assert any(w[:2] == b"\x00\x81" for w in conn.written)  # data went via pipe frames
+    assert any(w[:2] == b"\x00\x82" for w in conn.written)  # explicit END was sent
+
+
+@pytest.mark.asyncio
+async def test_write_slot_invalid_id_raises_before_any_write() -> None:
+    dev, conn = make_device([], max_queue_size=16)
+    with pytest.raises(ValueError):
+        await dev.write_slot(100, b"x")
+    assert conn.written == []
+
+
+@pytest.mark.asyncio
+async def test_write_slot_nack_too_large_propagates() -> None:
+    dev, _ = make_device([start_nack(0x08)], max_queue_size=16)
+    with pytest.raises(SlotTooLargeError):
+        await dev.write_slot(0, b"raw panel bytes" * 10000)
 
 
 # ─── Routing / probe-cache via _execute_upload ───────────────────────────────

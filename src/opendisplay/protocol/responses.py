@@ -365,10 +365,18 @@ def parse_read_msd(data: bytes) -> bytes:
 PIPE_START_NACK_BAD_PARAMS = 0x01  # bad version / params
 PIPE_START_NACK_COMPRESSION = 0x02  # compression unsupported (retry uncompressed)
 PIPE_START_NACK_SIZE = 0x03  # total_size mismatch vs panel config
-PIPE_START_NACK_BUSY = 0x04  # busy / bad state
+# LOCAL FORK DIVERGENCE (PSRAM slot storage), not upstream opendisplay-protocol --
+# see the matching OD_ERR_PIPE_START_SLOT_INVALID in Firmware's
+# opendisplay_protocol.h. Was previously PIPE_START_NACK_BUSY ("busy / bad
+# state") here, but that name never matched the canonical spec -- the upstream
+# header explicitly documented 0x04 as unused, and this constant was never
+# referenced anywhere in this codebase, so renaming it is safe.
+PIPE_START_NACK_SLOT_INVALID = 0x04  # slot-target: slot_id out of range, or slot storage unsupported here
 PIPE_START_NACK_ETAG_MISMATCH = 0x05  # partial: old_etag == 0 or != device displayed_etag
 PIPE_START_NACK_PARTIAL_UNSUPPORTED = 0x06  # partial: bpp != 1 or unsupported driver
 PIPE_START_NACK_RECT_INVALID = 0x07  # partial: rect zero-size / OOB / misaligned
+# LOCAL FORK DIVERGENCE, not upstream -- see OD_ERR_PIPE_START_SLOT_TOO_LARGE.
+PIPE_START_NACK_SLOT_TOO_LARGE = 0x08  # slot-target: total_size exceeds this board's per-slot ceiling
 
 # 0x0081 DATA NACK error codes (all fatal, Part 1 §1.3)
 PIPE_DATA_NACK_DECOMPRESS = 0x02

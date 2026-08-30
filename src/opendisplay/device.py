@@ -49,6 +49,8 @@ from .exceptions import (
     NfcNotSupportedError,
     ProtocolError,
     RefreshTimeoutError,
+    SlotInvalidError,
+    SlotTooLargeError,
     TruncatedConfigError,
 )
 from .landing import build_landing_url
@@ -88,6 +90,7 @@ from .protocol import (
     CommandCode,
     PipeParams,
     PipePartialRequest,
+    PipeSlotRequest,
     build_authenticate_step1,
     build_authenticate_step2,
     build_buzzer_activate_command,
@@ -133,6 +136,8 @@ from .protocol.responses import (
     PIPE_START_NACK_ETAG_MISMATCH,
     PIPE_START_NACK_PARTIAL_UNSUPPORTED,
     PIPE_START_NACK_RECT_INVALID,
+    PIPE_START_NACK_SLOT_INVALID,
+    PIPE_START_NACK_SLOT_TOO_LARGE,
     check_response_type,
     describe_command_code,
     is_compressed_failure_frame,
@@ -1590,6 +1595,63 @@ class OpenDisplayDevice:  # pylint: disable=too-many-instance-attributes
         await self.write_nfc(NfcRecordType.MIME, payload, timeout)
 
     @_serialized
+    async def write_slot(
+        self,
+        slot_id: int,
+        raw_data: bytes,
+        *,
+        progress_callback: Callable[[int, int], None] | None = None,
+    ) -> None:
+        """Push raw, already-panel-format image bytes into an on-device PSRAM slot.
+
+        LOCAL FORK DIVERGENCE (PSRAM slot storage), not upstream
+        opendisplay-protocol. Unlike ``upload_image``, this does NOT dither,
+        fit, or rotate — ``raw_data`` must already be exactly the bytes the
+        panel controller expects (the same format ``upload_image`` streams to
+        the panel), since a slot holds a pre-rendered page verbatim.
+
+        The device refreshes the panel with this slot's new content
+        immediately if and only if ``slot_id`` is the slot currently selected
+        on the device (via a physical button); otherwise the new content is
+        stored silently and stays unseen until a button selects that slot.
+        There is no BLE command to trigger a slot switch — only the device's
+        own buttons can change which slot is displayed.
+
+        Always compresses ``raw_data`` before sending; there is no
+        uncompressed option here (unlike ``upload_image``), since slots are
+        compressed-at-rest by design — 100 slots of a full uncompressed frame
+        would need far more PSRAM than any of these boards have.
+
+        Args:
+            slot_id: Target slot, 0..99. The actually-usable range is smaller
+                and board-specific (PSRAM size varies by board — see
+                SlotInvalidError below), not a fixed 100 everywhere.
+            raw_data: Raw panel-format bytes (pre-dithered/pre-encoded), as
+                they would be streamed to the panel controller uncompressed.
+            progress_callback: Optional ``(bytes_sent, bytes_total)`` callback,
+                reporting progress of the compressed bytes actually on the wire.
+
+        Raises:
+            ValueError: If ``slot_id`` is outside 0..99.
+            SlotInvalidError: Device rejected ``slot_id`` — out of range for
+                this specific board, or slot storage is unsupported/disabled
+                here entirely (e.g. a board with no PSRAM at all).
+            SlotTooLargeError: ``raw_data`` compresses to more than this
+                board's fixed per-slot ceiling (32KB in the current firmware).
+                Unlike a normal upload there's no fallback for this — the
+                payload itself needs to shrink.
+            ProtocolError: Other transport/protocol failure.
+        """
+        if not 0 <= slot_id <= 99:
+            raise ValueError(f"slot_id out of 0..99 range: {slot_id}")
+        compressed_data = compress_image_data(raw_data, level=6, window_bits=FIRMWARE_ZLIB_WINDOW_BITS)
+        _LOGGER.debug("write_slot(%d): %d bytes -> %d compressed", slot_id, len(raw_data), len(compressed_data))
+        params = await self._negotiate_pipe_slot(True, len(compressed_data), slot_id, decompressed_size=len(raw_data))
+        if params is None:
+            raise ProtocolError(f"Device did not accept slot-target PIPE_WRITE for slot {slot_id}")
+        await self._run_pipe_slot_upload(compressed_data, params, progress_callback)
+
+    @_serialized
     async def write_config(self, config: GlobalConfig) -> None:
         """Write configuration to device.
 
@@ -2643,6 +2705,146 @@ class OpenDisplayDevice:  # pylint: disable=too-many-instance-attributes
             ver,
         )
         return params
+
+    async def _negotiate_pipe_slot(
+        self,
+        compressed: bool,
+        total_size: int,
+        slot_id: int,
+        decompressed_size: int = 0,
+        _retry_uncompressed: bool = True,
+    ) -> PipeParams | None:
+        """Probe + negotiate a slot-target sliding-window transfer via 0x0080.
+
+        LOCAL FORK DIVERGENCE (PSRAM slot storage), not upstream
+        opendisplay-protocol. Sends an extended PIPE_WRITE_START (flags bit2
+        + 6-byte PipeSlotExt) targeting on-device slot ``slot_id`` instead of
+        the live panel. There is no legacy fallback for this (unlike
+        _negotiate_pipe / _negotiate_pipe_partial): a slot write either
+        succeeds via this path or fails outright, so a NACK or unrecoverable
+        response raises rather than returning None to trigger a fallback.
+
+        Returns:
+            PipeParams (effective, post-min-rule) on success.
+            None only when the device stayed silent (firmware predates PIPE_WRITE
+            entirely, or slot storage specifically) -- the caller should treat
+            that as a hard failure too, since there is nothing to fall back to.
+
+        Raises:
+            SlotInvalidError: NACK 0x04 -- slot_id out of range for this board
+                (PSRAM size varies by board), or slot storage is
+                unsupported/disabled here entirely.
+            SlotTooLargeError: NACK 0x08 -- total_size (the compressed byte
+                total) exceeds this board's per-slot ceiling.
+        """
+        req_frame = self._conn.max_frame  # transport frame ceiling; our client_max_frame (BLE=244)
+        slot = PipeSlotRequest(slot_id=slot_id, decompressed_size=decompressed_size)
+        await self._write(
+            build_pipe_write_start_command(
+                compressed,
+                self._max_queue_size,
+                self._blocks_per_ack,
+                req_frame,
+                total_size,
+                slot=slot,
+            )
+        )
+        try:
+            resp = await self._read(TIMEOUT_PIPE_START)
+        except BLETimeoutError:
+            _LOGGER.debug("No 0x0080 slot response within %.1fs; firmware may lack slot storage", TIMEOUT_PIPE_START)
+            return None
+
+        try:
+            ok, payload = parse_pipe_start_response(resp)
+        except InvalidResponseError as err:
+            _LOGGER.debug("Garbled 0x0080 slot response (%s)", err)
+            return None
+
+        if not ok:
+            err_code = cast(int, payload)
+            if err_code == PIPE_START_NACK_COMPRESSION and compressed and _retry_uncompressed:
+                _LOGGER.info("Device rejected compressed slot PIPE_WRITE (err 0x02); retrying uncompressed")
+                return await self._negotiate_pipe_slot(
+                    False, total_size, slot_id, decompressed_size, _retry_uncompressed=False
+                )
+            if err_code == PIPE_START_NACK_SLOT_INVALID:
+                raise SlotInvalidError(
+                    f"Device rejected slot {slot_id}: out of range for this board, "
+                    "or slot storage is unsupported/disabled here",
+                    slot_id=slot_id,
+                )
+            if err_code == PIPE_START_NACK_SLOT_TOO_LARGE:
+                raise SlotTooLargeError(
+                    f"Slot {slot_id} payload ({total_size} B compressed) exceeds this board's per-slot ceiling",
+                    slot_id=slot_id,
+                )
+            _LOGGER.info("Slot PIPE_WRITE START NACK (err 0x%02x)", err_code)
+            return None
+
+        ver, dev_max_window, dev_max_ack_every, dev_max_frame, flags = cast("tuple[int, int, int, int, int]", payload)
+        # Min-rule (Part 1 §1.1) — identical to _negotiate_pipe.
+        w_eff = max(1, min(self._max_queue_size, dev_max_window, 32))
+        n_eff = max(1, min(self._blocks_per_ack, dev_max_ack_every, w_eff))
+        frame_eff = min(req_frame, dev_max_frame)
+        selective = bool(flags & 0x01)
+        params = PipeParams(w_eff, n_eff, frame_eff, selective, compressed)
+        _LOGGER.info(
+            "Slot %d PIPE_WRITE negotiated: W=%d N=%d frame=%d selective=%s compressed=%s (dev max %d/%d/%d, ver %d)",
+            slot_id,
+            w_eff,
+            n_eff,
+            frame_eff,
+            selective,
+            compressed,
+            dev_max_window,
+            dev_max_ack_every,
+            dev_max_frame,
+            ver,
+        )
+        return params
+
+    async def _run_pipe_slot_upload(
+        self,
+        payload: bytes,
+        params: PipeParams,
+        progress_callback: Callable[[int, int], None] | None,
+    ) -> None:
+        """Split, stream, and END a slot-target sliding-window transfer.
+
+        LOCAL FORK DIVERGENCE (PSRAM slot storage), not upstream
+        opendisplay-protocol. Unlike _run_pipe_upload, this never waits for a
+        display refresh response (0x73/0x74): a slot-target END only ever
+        gets an END ACK from the firmware, since the device refreshes the
+        panel (if at all — only when this slot is the one currently
+        selected) entirely on its own after that ACK, with no further BLE
+        traffic. Waiting for a refresh response here would hang forever on a
+        slot write that doesn't happen to be the currently-displayed one.
+        """
+        size = self._pipe_data_size(params.max_frame)
+        if size < 1:
+            raise ProtocolError(f"Negotiated pipe frame {params.max_frame} too small for a data byte")
+        chunks = [payload[i : i + size] for i in range(0, len(payload), size)] or [b""]
+        self._pipe_params = params
+        chunk_timeout = self.TIMEOUT_PIPE_DATA_COMPRESSED if params.compressed else self.TIMEOUT_PIPE_DATA_UNCOMPRESSED
+
+        try:
+            auto_completed = await self._send_pipe_chunks(chunks, params, chunk_timeout, progress_callback)
+            if auto_completed:
+                # Slot writes negotiate compressed=True whenever possible, which
+                # makes _send_pipe_chunks use the explicit-END contract — this
+                # should never happen. Treat it as a protocol violation rather
+                # than silently accepting an unverified completion.
+                raise ProtocolError("Slot-target PIPE_WRITE auto-completed unexpectedly (unsolicited END_ACK)")
+            # refresh_mode/new_etag are meaningless for a slot-target END —
+            # firmware's slot branch never reads the END payload at all — but
+            # _await_pipe_end_ack's signature still takes them; pass harmless
+            # placeholders rather than forking that function for one unused
+            # parameter pair.
+            await self._await_pipe_end_ack(chunks, RefreshMode.FULL, None, params)
+            _LOGGER.info("Slot write complete (%d bytes)", len(payload))
+        finally:
+            self._pipe_params = None
 
     def _pipe_data_size(self, frame_eff: int) -> int:
         """Chunk data capacity for a pipe frame at ``frame_eff`` bytes.

@@ -159,6 +159,36 @@ class NfcNotSupportedError(ProtocolError):
         super().__init__(message)
 
 
+class SlotInvalidError(ProtocolError):
+    """Device rejected a slot-target PIPE_WRITE_START with OD_ERR_PIPE_START_SLOT_INVALID.
+
+    LOCAL FORK DIVERGENCE (PSRAM slot storage), not upstream opendisplay-protocol.
+    Raised when ``slot_id`` is out of range for this specific board (PSRAM size
+    varies by board, so the real slot count is per-device — see
+    ``write_slot``), or slot storage is unsupported/disabled here entirely
+    (e.g. a board with no PSRAM at all).
+    """
+
+    def __init__(self, message: str, slot_id: int | None = None) -> None:
+        super().__init__(message)
+        self.slot_id = slot_id
+
+
+class SlotTooLargeError(ProtocolError):
+    """Device rejected a slot-target PIPE_WRITE_START with OD_ERR_PIPE_START_SLOT_TOO_LARGE.
+
+    LOCAL FORK DIVERGENCE (PSRAM slot storage), not upstream opendisplay-protocol.
+    Raised when the compressed payload exceeds this board's fixed per-slot
+    ceiling (32KB in the current firmware). Unlike a normal image upload,
+    there is no dithering/re-encoding fallback for this — the payload itself
+    needs to shrink (more compression, or less detail in the source image).
+    """
+
+    def __init__(self, message: str, slot_id: int | None = None) -> None:
+        super().__init__(message)
+        self.slot_id = slot_id
+
+
 class ImageEncodingError(OpenDisplayError):
     """Failed to encode image."""
 

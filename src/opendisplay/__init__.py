@@ -28,6 +28,8 @@ from .exceptions import (
     OTANotSupportedError,
     ProtocolError,
     RefreshTimeoutError,
+    SlotInvalidError,
+    SlotTooLargeError,
     TruncatedConfigError,
 )
 from .landing import LANDING_URL_PREFIX, build_landing_payload, build_landing_url
@@ -122,6 +124,8 @@ __all__ = [
     "BLETimeoutError",
     "ProtocolError",
     "RefreshTimeoutError",
+    "SlotInvalidError",
+    "SlotTooLargeError",
     "ConfigParseError",
     "TruncatedConfigError",
     "InvalidResponseError",

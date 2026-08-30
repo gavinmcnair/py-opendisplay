@@ -81,6 +81,10 @@ MAX_START_PAYLOAD = 200  # Maximum bytes in START command (prevents MTU issues)
 PIPE_VERSION = 1  # Protocol version carried in the 0x0080 request/response
 PIPE_FLAG_COMPRESSED = 0x01  # 0x0080 flags bit0: streamed bytes are zlib-compressed
 PIPE_FLAG_PARTIAL = 0x02  # 0x0080 flags bit1: transfer is a partial-region refresh
+# LOCAL FORK DIVERGENCE (PSRAM slot storage), not upstream opendisplay-protocol --
+# see the matching comment in Firmware's opendisplay_protocol.h. Mutually exclusive
+# with PIPE_FLAG_PARTIAL: writes into an on-device PSRAM slot instead of the panel.
+PIPE_FLAG_SLOT_TARGET = 0x04  # 0x0080 flags bit2: transfer targets a PSRAM slot, not the panel
 PIPE_FRAME_OVERHEAD = 3  # Plaintext 0x0081 header: cmd(2) + seq(1)
 DEFAULT_MAX_FRAME = 244  # HA native GATT write ceiling (client_max_frame request)
 # Seconds to wait for the 0x0080 START response. Pipe attempts are gated on the
@@ -364,6 +368,27 @@ class PipePartialRequest:
     h: int
 
 
+@dataclass(frozen=True)
+class PipeSlotRequest:
+    """Slot-target extension appended to a PIPE_WRITE_START (0x0080) request.
+
+    LOCAL FORK DIVERGENCE (PSRAM slot storage), not upstream opendisplay-protocol
+    -- see the matching PipeSlotExt struct in Firmware's opendisplay_structs.h.
+    Mutually exclusive with ``partial`` on :func:`build_pipe_write_start_command`.
+
+    Attributes:
+        slot_id: Target slot index, 0..99. The device NACKs
+            OD_ERR_PIPE_START_SLOT_INVALID if this is >= that board's slot count
+            (PSRAM size varies by board, so the real ceiling is per-device).
+        decompressed_size: Optional parity-check hint for the switch-time tinfl
+            decode (0 = skip the check). NOT used to size anything during the
+            write itself, which always stores the compressed bytes as-is.
+    """
+
+    slot_id: int
+    decompressed_size: int = 0
+
+
 def build_pipe_write_start_command(
     compressed: bool,
     window: int,
@@ -372,29 +397,38 @@ def build_pipe_write_start_command(
     total_size: int,
     *,
     partial: PipePartialRequest | None = None,
+    slot: PipeSlotRequest | None = None,
 ) -> bytes:
     """Build a PIPE_WRITE_START (0x0080) start + negotiation command.
 
     One round trip carries both the transfer parameters and the negotiation
     request; the device replies with its own maxima (see parse_pipe_start_response).
 
-    Wire (10-byte header, or 22-byte payload when ``partial`` is set):
+    Wire (10-byte header; 22-byte payload when ``partial`` is set; 16-byte
+    payload when ``slot`` is set):
         [0x00][0x80][ver:1][flags:1][req_window:1][req_ack_every:1]
                     [client_max_frame:2 LE][total_size:4 LE]
         --- appended iff flags bit1 (PIPE_FLAG_PARTIAL) is set ---
                     [old_etag:4 LE][x:2 LE][y:2 LE][w:2 LE][h:2 LE]
+        --- appended iff flags bit2 (PIPE_FLAG_SLOT_TARGET) is set ---
+                    [slot_id:1][reserved:1][decompressed_size:4 LE]
         - ver         = PIPE_VERSION (1)
         - flags bit0  = compressed (zlib, window_bits <= 9)
         - flags bit1  = partial-region refresh (0x02); other bits reserved 0
+        - flags bit2  = slot-target (0x04, LOCAL FORK DIVERGENCE -- see
+          PIPE_FLAG_SLOT_TARGET); mutually exclusive with bit1
         - req_window  = requested "max queue size" W (tokens in flight), 1..32
         - req_ack_every = requested "blocks per ack" N, 1..32
         - client_max_frame = client MTU-derived frame ceiling (<= 244)
-        - total_size  = decompressed panel byte total (partial: plane_size*2)
+        - total_size  = decompressed panel byte total (partial: plane_size*2;
+          slot-target: the COMPRESSED byte total being stored, since slots hold
+          data compressed-at-rest and must fit that board's per-slot ceiling)
 
-    The 12-byte partial extension is packed little-endian via ``struct.pack`` to
-    match the rest of the pipe header; the legacy 0x76 START packs the same fields
-    big-endian and that byte order is intentionally not reused. ``partial=None``
-    yields the exact same bytes as before the extension was added.
+    The 12-byte partial extension and the 6-byte slot extension are both packed
+    little-endian via ``struct.pack`` to match the rest of the pipe header; the
+    legacy 0x76 START packs the same partial fields big-endian and that byte
+    order is intentionally not reused. ``partial=None, slot=None`` yields the
+    exact same bytes as before either extension was added.
 
     Unlike legacy compressed 0x70 START, this header is fixed-length and carries
     NO inline data — all payload flows via 0x0081 DATA frames.
@@ -404,15 +438,21 @@ def build_pipe_write_start_command(
         window: Requested window / max queue size (tokens in flight).
         ack_every: Requested ACK cadence (blocks per ack).
         max_frame: Client max frame size in bytes.
-        total_size: Decompressed panel byte total.
+        total_size: Decompressed panel byte total (or compressed total when
+            ``slot`` is set -- see above).
         partial: Optional partial-region geometry (keyword-only). When set, flags
-            bit1 is raised and the 12-byte geometry is appended.
+            bit1 is raised and the 12-byte geometry is appended. Mutually
+            exclusive with ``slot``.
+        slot: Optional slot-target request (keyword-only). When set, flags bit2
+            is raised and the 6-byte extension is appended. Mutually exclusive
+            with ``partial``.
 
     Returns:
         Command bytes for 0x0080.
 
     Raises:
-        ValueError: If any field is outside its wire range.
+        ValueError: If any field is outside its wire range, or both ``partial``
+            and ``slot`` are given.
     """
     if not 0 <= window <= 0xFF:
         raise ValueError(f"window out of uint8 range: {window}")
@@ -422,6 +462,8 @@ def build_pipe_write_start_command(
         raise ValueError(f"max_frame out of uint16 range: {max_frame}")
     if not 0 <= total_size <= 0xFFFFFFFF:
         raise ValueError(f"total_size out of uint32 range: {total_size}")
+    if partial is not None and slot is not None:
+        raise ValueError("partial and slot are mutually exclusive")
 
     cmd = CommandCode.PIPE_WRITE_START.to_bytes(2, byteorder="big")
     flags = PIPE_FLAG_COMPRESSED if compressed else 0
@@ -432,10 +474,18 @@ def build_pipe_write_start_command(
             if not 0 <= value <= 0xFFFF:
                 raise ValueError(f"partial {name} out of uint16 range: {value}")
         flags |= PIPE_FLAG_PARTIAL
+    if slot is not None:
+        if not 0 <= slot.slot_id <= 99:
+            raise ValueError(f"slot_id out of 0..99 range: {slot.slot_id}")
+        if not 0 <= slot.decompressed_size <= 0xFFFFFFFF:
+            raise ValueError(f"slot decompressed_size out of uint32 range: {slot.decompressed_size}")
+        flags |= PIPE_FLAG_SLOT_TARGET
     header = bytes([PIPE_VERSION, flags, window, ack_every])
     packet = cmd + header + struct.pack("<H", max_frame) + struct.pack("<I", total_size)
     if partial is not None:
         packet += struct.pack("<IHHHH", partial.old_etag, partial.x, partial.y, partial.w, partial.h)
+    if slot is not None:
+        packet += struct.pack("<BBI", slot.slot_id, 0, slot.decompressed_size)
     return packet
 
 
