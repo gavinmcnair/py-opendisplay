@@ -365,7 +365,7 @@ def parse_read_msd(data: bytes) -> bytes:
 PIPE_START_NACK_BAD_PARAMS = 0x01  # bad version / params
 PIPE_START_NACK_COMPRESSION = 0x02  # compression unsupported (retry uncompressed)
 PIPE_START_NACK_SIZE = 0x03  # total_size mismatch vs panel config
-# LOCAL FORK DIVERGENCE (PSRAM slot storage), not upstream opendisplay-protocol --
+# LOCAL FORK DIVERGENCE (flash-backed slot storage), not upstream opendisplay-protocol --
 # see the matching OD_ERR_PIPE_START_SLOT_INVALID in Firmware's
 # opendisplay_protocol.h. Was previously PIPE_START_NACK_BUSY ("busy / bad
 # state") here, but that name never matched the canonical spec -- the upstream

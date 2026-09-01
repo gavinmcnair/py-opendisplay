@@ -1602,30 +1602,30 @@ class OpenDisplayDevice:  # pylint: disable=too-many-instance-attributes
         *,
         progress_callback: Callable[[int, int], None] | None = None,
     ) -> None:
-        """Push raw, already-panel-format image bytes into an on-device PSRAM slot.
+        """Push raw, already-panel-format image bytes into a persistent on-device slot.
 
-        LOCAL FORK DIVERGENCE (PSRAM slot storage), not upstream
-        opendisplay-protocol. Unlike ``upload_image``, this does NOT dither,
-        fit, or rotate — ``raw_data`` must already be exactly the bytes the
-        panel controller expects (the same format ``upload_image`` streams to
-        the panel), since a slot holds a pre-rendered page verbatim.
+        LOCAL FORK DIVERGENCE (flash-backed slot storage), not upstream
+        opendisplay-protocol. Slots are LittleFS files on the device, so they
+        survive deep sleep and power loss. Unlike ``upload_image``, this does
+        NOT dither, fit, or rotate — ``raw_data`` must already be exactly the
+        bytes the panel controller expects (the same format ``upload_image``
+        streams to the panel), since a slot holds a pre-rendered page verbatim.
 
         The device refreshes the panel with this slot's new content
         immediately if and only if ``slot_id`` is the slot currently selected
-        on the device (via a physical button); otherwise the new content is
-        stored silently and stays unseen until a button selects that slot.
-        There is no BLE command to trigger a slot switch — only the device's
-        own buttons can change which slot is displayed.
+        on the device; otherwise the new content is stored silently and stays
+        unseen until a button — or a CMD_SLOT_SWITCH (0x0084) request, the
+        server-driven equivalent of a button press — selects that slot.
 
         Always compresses ``raw_data`` before sending; there is no
-        uncompressed option here (unlike ``upload_image``), since slots are
-        compressed-at-rest by design — 100 slots of a full uncompressed frame
-        would need far more PSRAM than any of these boards have.
+        uncompressed option here (unlike ``upload_image``): slots are
+        compressed-at-rest by design, and the firmware NACKs a slot-target
+        transfer that does not set the compressed flag.
 
         Args:
             slot_id: Target slot, 0..99. The actually-usable range is smaller
-                and board-specific (PSRAM size varies by board — see
-                SlotInvalidError below), not a fixed 100 everywhere.
+                and board-specific (derived from the board's filesystem size —
+                see SlotInvalidError below), not a fixed 100 everywhere.
             raw_data: Raw panel-format bytes (pre-dithered/pre-encoded), as
                 they would be streamed to the panel controller uncompressed.
             progress_callback: Optional ``(bytes_sent, bytes_total)`` callback,
@@ -2716,7 +2716,7 @@ class OpenDisplayDevice:  # pylint: disable=too-many-instance-attributes
     ) -> PipeParams | None:
         """Probe + negotiate a slot-target sliding-window transfer via 0x0080.
 
-        LOCAL FORK DIVERGENCE (PSRAM slot storage), not upstream
+        LOCAL FORK DIVERGENCE (flash-backed slot storage), not upstream
         opendisplay-protocol. Sends an extended PIPE_WRITE_START (flags bit2
         + 6-byte PipeSlotExt) targeting on-device slot ``slot_id`` instead of
         the live panel. There is no legacy fallback for this (unlike
@@ -2732,7 +2732,7 @@ class OpenDisplayDevice:  # pylint: disable=too-many-instance-attributes
 
         Raises:
             SlotInvalidError: NACK 0x04 -- slot_id out of range for this board
-                (PSRAM size varies by board), or slot storage is
+                (capacity is derived from the board's filesystem size), or slot storage is
                 unsupported/disabled here entirely.
             SlotTooLargeError: NACK 0x08 -- total_size (the compressed byte
                 total) exceeds this board's per-slot ceiling.
@@ -2812,7 +2812,7 @@ class OpenDisplayDevice:  # pylint: disable=too-many-instance-attributes
     ) -> None:
         """Split, stream, and END a slot-target sliding-window transfer.
 
-        LOCAL FORK DIVERGENCE (PSRAM slot storage), not upstream
+        LOCAL FORK DIVERGENCE (flash-backed slot storage), not upstream
         opendisplay-protocol. Unlike _run_pipe_upload, this never waits for a
         display refresh response (0x73/0x74): a slot-target END only ever
         gets an END ACK from the firmware, since the device refreshes the

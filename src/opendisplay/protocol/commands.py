@@ -81,7 +81,7 @@ MAX_START_PAYLOAD = 200  # Maximum bytes in START command (prevents MTU issues)
 PIPE_VERSION = 1  # Protocol version carried in the 0x0080 request/response
 PIPE_FLAG_COMPRESSED = 0x01  # 0x0080 flags bit0: streamed bytes are zlib-compressed
 PIPE_FLAG_PARTIAL = 0x02  # 0x0080 flags bit1: transfer is a partial-region refresh
-# LOCAL FORK DIVERGENCE (PSRAM slot storage), not upstream opendisplay-protocol --
+# LOCAL FORK DIVERGENCE (flash-backed slot storage), not upstream opendisplay-protocol --
 # see the matching comment in Firmware's opendisplay_protocol.h. Mutually exclusive
 # with PIPE_FLAG_PARTIAL: writes into an on-device PSRAM slot instead of the panel.
 PIPE_FLAG_SLOT_TARGET = 0x04  # 0x0080 flags bit2: transfer targets a PSRAM slot, not the panel
@@ -372,7 +372,7 @@ class PipePartialRequest:
 class PipeSlotRequest:
     """Slot-target extension appended to a PIPE_WRITE_START (0x0080) request.
 
-    LOCAL FORK DIVERGENCE (PSRAM slot storage), not upstream opendisplay-protocol
+    LOCAL FORK DIVERGENCE (flash-backed slot storage), not upstream opendisplay-protocol
     -- see the matching PipeSlotExt struct in Firmware's opendisplay_structs.h.
     Mutually exclusive with ``partial`` on :func:`build_pipe_write_start_command`.
 
