@@ -737,13 +737,18 @@ async def test_negotiate_slot_nack_too_large_raises() -> None:
 
 
 @pytest.mark.asyncio
-async def test_negotiate_slot_compressed_02_retries_uncompressed() -> None:
-    dev, conn = make_device([start_nack(0x02), start_ack(flags=0x01)], max_queue_size=16)
+async def test_negotiate_slot_nack_02_never_retries_uncompressed() -> None:
+    """On the slot path NACK 0x02 is OD_ERR_PIPE_START_UNKNOWN_FLAG -- what
+    stock firmware (no PIPE_FLAG_SLOT_TARGET) answers, and what slot-aware
+    firmware answers to a slot START missing the compressed flag (slots are
+    compressed-at-rest). The old "retry uncompressed" behavior resent the
+    very thing the firmware refused; the correct response is to give up.
+    """
+    dev, conn = make_device([start_nack(0x02)], max_queue_size=16)
     params = await dev._negotiate_pipe_slot(compressed=True, total_size=16, slot_id=0)
-    assert params is not None
-    assert params.compressed is False
+    assert params is None
     starts = [w for w in conn.written if w[:2] == b"\x00\x80"]
-    assert len(starts) == 2
+    assert len(starts) == 1
 
 
 @pytest.mark.asyncio

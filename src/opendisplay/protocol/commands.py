@@ -83,8 +83,8 @@ PIPE_FLAG_COMPRESSED = 0x01  # 0x0080 flags bit0: streamed bytes are zlib-compre
 PIPE_FLAG_PARTIAL = 0x02  # 0x0080 flags bit1: transfer is a partial-region refresh
 # LOCAL FORK DIVERGENCE (flash-backed slot storage), not upstream opendisplay-protocol --
 # see the matching comment in Firmware's opendisplay_protocol.h. Mutually exclusive
-# with PIPE_FLAG_PARTIAL: writes into an on-device PSRAM slot instead of the panel.
-PIPE_FLAG_SLOT_TARGET = 0x04  # 0x0080 flags bit2: transfer targets a PSRAM slot, not the panel
+# with PIPE_FLAG_PARTIAL: writes into a persistent on-device slot instead of the panel.
+PIPE_FLAG_SLOT_TARGET = 0x04  # 0x0080 flags bit2: transfer targets a persistent slot, not the panel
 PIPE_FRAME_OVERHEAD = 3  # Plaintext 0x0081 header: cmd(2) + seq(1)
 DEFAULT_MAX_FRAME = 244  # HA native GATT write ceiling (client_max_frame request)
 # Seconds to wait for the 0x0080 START response. Pipe attempts are gated on the

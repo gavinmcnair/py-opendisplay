@@ -2712,7 +2712,6 @@ class OpenDisplayDevice:  # pylint: disable=too-many-instance-attributes
         total_size: int,
         slot_id: int,
         decompressed_size: int = 0,
-        _retry_uncompressed: bool = True,
     ) -> PipeParams | None:
         """Probe + negotiate a slot-target sliding-window transfer via 0x0080.
 
@@ -2763,11 +2762,17 @@ class OpenDisplayDevice:  # pylint: disable=too-many-instance-attributes
 
         if not ok:
             err_code = cast(int, payload)
-            if err_code == PIPE_START_NACK_COMPRESSION and compressed and _retry_uncompressed:
-                _LOGGER.info("Device rejected compressed slot PIPE_WRITE (err 0x02); retrying uncompressed")
-                return await self._negotiate_pipe_slot(
-                    False, total_size, slot_id, decompressed_size, _retry_uncompressed=False
+            if err_code == PIPE_START_NACK_COMPRESSION:
+                # No uncompressed retry on the slot path, unlike _negotiate_pipe:
+                # slots are compressed-at-rest by design, and on this path 0x02
+                # is OD_ERR_PIPE_START_UNKNOWN_FLAG -- what stock firmware
+                # (predating PIPE_FLAG_SLOT_TARGET) answers, and what slot-aware
+                # firmware answers to a slot START without the compressed flag.
+                # Retrying uncompressed would resend the very thing refused.
+                _LOGGER.info(
+                    "Slot PIPE_WRITE START NACK 0x02 (unknown flag): firmware likely lacks slot storage"
                 )
+                return None
             if err_code == PIPE_START_NACK_SLOT_INVALID:
                 raise SlotInvalidError(
                     f"Device rejected slot {slot_id}: out of range for this board, "
